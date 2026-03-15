@@ -1,29 +1,20 @@
-# TELE 523 Telemetry PBL – Group 5
-
-## Project Title
-Industrial Machine Condition Monitoring Using Telemetry for Mining and Power Generation in Botswana
-
-## Overview
-This repository contains the end-to-end telemetry and remote monitoring pipeline implemented in Python:
-Dataset → Preprocessing → Modulation → Channel → Demodulation → Digital Telemetry (Quantization/PCM) → Feature Extraction → Monitoring Output.
-
-## Repository Structure
-'''
+```
 telemetry_pbl_group1/
 │
 ├── data/
-│   ├── raw/                  # Original dataset files
-│   └── processed/            # Final processed datasets used by downstream modules
+│   ├── raw/
+│   └── processed/
 │
-├── docs/                     # Notes, design documents, report assets
+├── docs/
 │   ├── dataset_description.md
 │   ├── report_figures.md
 │   └── system_architecture.md
-├── results/
-│   ├── figures/              # Generated plots and diagrams                
-│   └── logs/                 # Execution logs
 │
-├── scripts/                  # Top-level runnable scripts for pipeline execution
+├── results/
+│   ├── figures/
+│   └── logs/
+│
+├── scripts/
 │
 ├── src/
 │   ├── signal_processing_lead/
@@ -59,11 +50,12 @@ telemetry_pbl_group1/
 │       ├── integration_tests.py
 │       └── system_diagram.py
 │
-├── tests/                    # Additional test scripts and validation cases
+├── tests/
 │   ├── test_preprocessing.py
 │   ├── test_modulation.py
 │   ├── test_telemetry_pipeline.py
-│   └── test_monitoring.py  
-'''
-├── requirements.txt          # Python dependencies
+│   └── test_monitoring.py
+│
+├── requirements.txt
 └── README.md
+```
