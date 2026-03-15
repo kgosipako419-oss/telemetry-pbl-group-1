@@ -8,6 +8,7 @@ This repository contains the end-to-end telemetry and remote monitoring pipeline
 Dataset → Preprocessing → Modulation → Channel → Demodulation → Digital Telemetry (Quantization/PCM) → Feature Extraction → Monitoring Output.
 
 ## Repository Structure
+'''
 telemetry_pbl_group1/
 │
 ├── data/
@@ -62,6 +63,7 @@ telemetry_pbl_group1/
 │   ├── test_preprocessing.py
 │   ├── test_modulation.py
 │   ├── test_telemetry_pipeline.py
-│   └── test_monitoring.py                             
+│   └── test_monitoring.py  
+'''
 ├── requirements.txt          # Python dependencies
 └── README.md
