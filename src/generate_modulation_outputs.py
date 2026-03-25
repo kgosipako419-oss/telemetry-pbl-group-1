@@ -1,190 +1,149 @@
 """
-generate_modulation_outputs_v2.py — Student 3: Modulation Lead
+generate_modulation_outputs.py — Student 3: Modulation Lead
 TELE 523 · Group 1 · Industrial Machine Condition Monitoring
 
-Each station's filtered signal columns pass through ALL 5 modulation schemes
-independently. Output: one CSV per scheme per station (35 files total).
+Writes the handoff CSV files for Student 4 (Digital Telemetry Lead).
 
-Structure:
-  {STATION}_AM.csv   — columns: timestamp, {col}_baseband, {col}_am_demodulated, ...
-  {STATION}_FM.csv   — columns: timestamp, {col}_baseband, {col}_fm_demodulated, ...
-  {STATION}_ASK.csv  — columns: timestamp, {col}_baseband, {col}_ask_recovered, ...
-  {STATION}_FSK.csv  — columns: timestamp, {col}_baseband, {col}_fsk_recovered, ...
-  {STATION}_PSK.csv  — columns: timestamp, {col}_baseband, {col}_psk_recovered, ...
+Imports all modulation functions from modulation.py — no math is duplicated
+here. This script is purely responsible for:
+  1. Running every signal column through every scheme independently
+     (by calling the run_* functions from modulation.py)
+  2. Saving the results in a format Student 4 can directly use
 
-Each file also carries current_state_binary for Student 4's labelling.
-Analog demodulated outputs (AM, FM, ASK envelope) are normalised to [0,1]
-so Student 4 can apply quantization directly.
-Digital recovered outputs (ASK bits, FSK bits, PSK bits) are 0/1 integers
-ready for line coding (NRZ, Manchester) and PCM.
+Output: 5 CSV files per station = 35 files total in results/modulation/output/
+  {STATION}_AM.csv   — AM demodulated analog signal  [0,1]  -> quantize directly
+  {STATION}_FM.csv   — FM demodulated analog signal  [0,1]  -> quantize directly
+  {STATION}_ASK.csv  — ASK recovered bit sequence    {0,1}  -> line coding / PCM
+  {STATION}_FSK.csv  — FSK recovered bit sequence    {0,1}  -> line coding / PCM
+  {STATION}_PSK.csv  — PSK recovered bit sequence    {0,1}  -> line coding / PCM
+
+Each file includes:
+  - timestamp
+  - {col}_baseband           normalised [0,1] source signal
+  - {col}_*_demodulated  or  {col}_original_bits / {col}_*_recovered
+  - current_state_binary     machine state label (ready=1) carried through
 """
 
 import os
+import sys
 import numpy as np
 import pandas as pd
-from scipy.signal import hilbert
 
-PROCESSED_PATH = "/home/claude/data/processed"
-OUT_DIR        = "/home/claude/results/modulation/output_v2"
+# ── Import all modulation functions from modulation.py ────────────────────────
+# Both scripts live in src/. If running from the project root, the fallback
+# sys.path insert handles discovery automatically.
+try:
+    from modulation import (
+        SIGNAL_COLS,
+        normalise, _expand_bits,
+        run_am, run_fm, run_ask, run_fsk, run_psk,
+    )
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from modulation import (
+        SIGNAL_COLS,
+        normalise, _expand_bits,
+        run_am, run_fm, run_ask, run_fsk, run_psk,
+    )
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+BASE_DIR       = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROCESSED_PATH = os.path.join(BASE_DIR, "data", "processed")
+OUT_DIR        = os.path.join(BASE_DIR, "results", "modulation", "output")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# Parameters
-FS        = 0.5
-FC        = 0.05
-NOISE_STD = 0.05
-F0_FSK    = 0.03
-F1_FSK    = 0.07
-MOD_INDEX = 0.8
-KF        = 0.1
 
-SIGNAL_COLS = {
-    "EC_1"  : ["i3_photoresistor", "current_task_duration"],
-    "HBW_1" : ["m1_speed", "m2_speed", "m3_speed", "m4_speed", "current_task_duration"],
-    "MM_1"  : ["m1_speed", "m2_speed", "m3_speed", "current_task_duration"],
-    "OV_1"  : ["m1_speed", "current_task_duration"],
-    "SM_1"  : ["m1_speed", "current_task_duration"],
-    "VGR_1" : ["m1_speed", "m2_speed", "m3_speed", "current_task_duration"],
-    "WT_1"  : ["m2_speed", "current_task_duration"],
-}
+# =============================================================================
+# MAIN PROCESSING
+# =============================================================================
 
-# ── Utilities ──────────────────────────────────────────────────────────────────
-def t_ax(n):     return np.arange(n) / FS
-def norm(s):
-    lo, hi = s.min(), s.max()
-    return np.zeros_like(s, dtype=float) if hi-lo < 1e-12 else (s-lo)/(hi-lo)
-def awgn(s, seed=42):
-    return s + np.random.default_rng(seed).normal(0, NOISE_STD, len(s))
-def s2bits(s):   return (np.clip(norm(s), 0, 1) > 0.5).astype(int)
-def spb(n, nb):  return max(1, n // max(1, nb))
+def generate_outputs():
+    print("=" * 70)
+    print("Generating Student 4 handoff CSVs")
+    print("Every signal column passes through every scheme independently")
+    print("=" * 70)
 
-# ── AM ─────────────────────────────────────────────────────────────────────────
-def am_pipeline(x):
-    t = t_ax(len(x))
-    mod = (1 + MOD_INDEX * norm(x)) * np.cos(2*np.pi*FC*t)
-    rx  = awgn(mod)
-    env = np.abs(hilbert(rx)); env -= env.mean()
-    return np.clip(norm(env), 0, 1)          # normalised demodulated signal
+    total_files = 0
 
-# ── FM ─────────────────────────────────────────────────────────────────────────
-def fm_pipeline(x):
-    t = t_ax(len(x))
-    mod = np.cos(2*np.pi*FC*t + 2*np.pi*KF*np.cumsum(norm(x))/FS)
-    rx  = awgn(mod)
-    phase = np.unwrap(np.angle(hilbert(rx)))
-    ifreq = np.append(np.diff(phase)/(2*np.pi/FS), 0) - FC
-    return np.clip(norm(ifreq), 0, 1)
+    for station in sorted(SIGNAL_COLS.keys()):
+        fpath = os.path.join(PROCESSED_PATH, f"{station}_filtered.csv")
+        if not os.path.exists(fpath):
+            print(f"[SKIP] {station} — filtered CSV not found")
+            continue
 
-# ── ASK ────────────────────────────────────────────────────────────────────────
-def ask_pipeline(x):
-    n    = len(x)
-    bits = s2bits(x)
-    nb   = len(bits)
-    s    = spb(n, nb)
-    t    = t_ax(n)
-    env  = np.repeat(bits.astype(float), s)[:n]
-    if len(env) < n: env = np.pad(env, (0, n-len(env)), constant_values=env[-1])
-    mod  = env * np.cos(2*np.pi*FC*t)
-    rx   = awgn(mod)
-    # Envelope detection → recovered bit per sample window
-    env_rx    = np.abs(hilbert(rx))
-    rec_bits  = np.array([1 if np.mean(env_rx[i*s:(i+1)*s]) > 0.5 else 0
-                          for i in range(nb)])
-    # Expand recovered bits back to sample resolution
-    recovered = np.repeat(rec_bits, s)[:n]
-    if len(recovered) < n: recovered = np.pad(recovered, (0, n-len(recovered)), constant_values=recovered[-1])
-    return recovered.astype(int), bits, rec_bits   # sample-res, original bits, recovered bits
+        df       = pd.read_csv(fpath, parse_dates=["timestamp"])
+        sig_cols = [c for c in SIGNAL_COLS[station] if c in df.columns]
+        labels   = (df["current_state_binary"].fillna(0).astype(int)
+                    if "current_state_binary" in df.columns
+                    else pd.Series(np.zeros(len(df), dtype=int)))
+        ts = df["timestamp"]
 
-# ── FSK ────────────────────────────────────────────────────────────────────────
-def fsk_pipeline(x):
-    n    = len(x)
-    bits = s2bits(x)
-    nb   = len(bits)
-    s    = spb(n, nb)
-    t    = t_ax(n)
-    mod  = np.zeros(n)
-    for i, b in enumerate(bits):
-        st, en = i*s, min((i+1)*s, n)
-        mod[st:en] = np.cos(2*np.pi*(F1_FSK if b else F0_FSK)*t[st:en])
-    rx   = awgn(mod)
-    r0, r1 = np.cos(2*np.pi*F0_FSK*t), np.cos(2*np.pi*F1_FSK*t)
-    rec_bits = np.array([
-        1 if abs(np.dot(rx[i*s:min((i+1)*s,n)], r1[i*s:min((i+1)*s,n)])) >
-             abs(np.dot(rx[i*s:min((i+1)*s,n)], r0[i*s:min((i+1)*s,n)])) else 0
-        for i in range(nb)])
-    recovered = np.repeat(rec_bits, s)[:n]
-    if len(recovered) < n: recovered = np.pad(recovered, (0, n-len(recovered)), constant_values=recovered[-1])
-    return recovered.astype(int), bits, rec_bits
+        print(f"\n-- {station} " + "-"*50)
 
-# ── PSK (BPSK) ─────────────────────────────────────────────────────────────────
-def psk_pipeline(x):
-    n    = len(x)
-    bits = s2bits(x)
-    nb   = len(bits)
-    s    = spb(n, nb)
-    t    = t_ax(n)
-    phases = np.repeat(np.where(bits==1, 0, np.pi), s)[:n]
-    if len(phases) < n: phases = np.pad(phases, (0, n-len(phases)), constant_values=phases[-1])
-    mod  = np.cos(2*np.pi*FC*t + phases)
-    rx   = awgn(mod)
-    prod = rx * np.cos(2*np.pi*FC*t)
-    rec_bits = np.array([1 if np.mean(prod[i*s:min((i+1)*s,n)]) > 0 else 0
-                         for i in range(nb)])
-    recovered = np.repeat(rec_bits, s)[:n]
-    if len(recovered) < n: recovered = np.pad(recovered, (0, n-len(recovered)), constant_values=recovered[-1])
-    return recovered.astype(int), bits, rec_bits
+        # One output dict per scheme — built up column by column
+        am_out  = {"timestamp": ts, "current_state_binary": labels}
+        fm_out  = {"timestamp": ts, "current_state_binary": labels}
+        ask_out = {"timestamp": ts, "current_state_binary": labels}
+        fsk_out = {"timestamp": ts, "current_state_binary": labels}
+        psk_out = {"timestamp": ts, "current_state_binary": labels}
 
-# ══════════════════════════════════════════════════════════════════════════════
-SCHEMES = ["AM", "FM", "ASK", "FSK", "PSK"]
+        for col in sig_cols:
+            x = df[col].fillna(0).to_numpy(dtype=float)
+            if len(x) < 30:
+                continue
+            n = len(x)
 
-for station in sorted(SIGNAL_COLS.keys()):
-    fpath = os.path.join(PROCESSED_PATH, f"{station}_filtered.csv")
-    if not os.path.exists(fpath):
-        print(f"[SKIP] {station}"); continue
+            # AM — independent run for this column
+            _, _, dem_am, snr_am = run_am(x)
+            am_out[f"{col}_baseband"]       = np.round(normalise(x), 6)
+            am_out[f"{col}_am_demodulated"] = np.round(dem_am, 6)
+            print(f"  AM  · {col:30s} SNR={snr_am:.1f} dB")
 
-    df      = pd.read_csv(fpath, parse_dates=["timestamp"])
-    cols    = [c for c in SIGNAL_COLS[station] if c in df.columns]
-    labels  = df["current_state_binary"].fillna(0).astype(int) if "current_state_binary" in df.columns else pd.Series(np.zeros(len(df), dtype=int))
-    ts      = df["timestamp"]
+            # FM — independent run for this column
+            _, _, dem_fm, snr_fm = run_fm(x)
+            fm_out[f"{col}_baseband"]       = np.round(normalise(x), 6)
+            fm_out[f"{col}_fm_demodulated"] = np.round(dem_fm, 6)
+            print(f"  FM  · {col:30s} SNR={snr_fm:.1f} dB")
 
-    # Build one output dict per scheme
-    out = {s: {"timestamp": ts, "current_state_binary": labels} for s in SCHEMES}
+            # ASK — independent run for this column
+            _, _, rec_ask, env_ask, snr_ask, ber_ask, orig_ask = run_ask(x)
+            ask_out[f"{col}_baseband"]      = np.round(normalise(x), 6)
+            ask_out[f"{col}_original_bits"] = _expand_bits(orig_ask, n).astype(int)
+            ask_out[f"{col}_ask_recovered"] = _expand_bits(rec_ask,  n).astype(int)
+            print(f"  ASK · {col:30s} SNR={snr_ask:.1f} dB | BER={ber_ask:.5f}")
 
-    for col in cols:
-        x = df[col].fillna(0).to_numpy(dtype=float)
-        if len(x) < 30: continue
+            # FSK — independent run for this column
+            _, _, rec_fsk, snr_fsk, ber_fsk, orig_fsk = run_fsk(x)
+            fsk_out[f"{col}_baseband"]      = np.round(normalise(x), 6)
+            fsk_out[f"{col}_original_bits"] = _expand_bits(orig_fsk, n).astype(int)
+            fsk_out[f"{col}_fsk_recovered"] = _expand_bits(rec_fsk,  n).astype(int)
+            print(f"  FSK · {col:30s} SNR={snr_fsk:.1f} dB | BER={ber_fsk:.5f}")
 
-        # Every signal column passes through every scheme
-        out["AM"][f"{col}_baseband"]      = np.round(norm(x), 6)
-        out["AM"][f"{col}_am_demodulated"]= np.round(am_pipeline(x), 6)
+            # PSK — independent run for this column
+            _, _, rec_psk, snr_psk, ber_psk, orig_psk = run_psk(x)
+            psk_out[f"{col}_baseband"]      = np.round(normalise(x), 6)
+            psk_out[f"{col}_original_bits"] = _expand_bits(orig_psk, n).astype(int)
+            psk_out[f"{col}_psk_recovered"] = _expand_bits(rec_psk,  n).astype(int)
+            print(f"  PSK · {col:30s} SNR={snr_psk:.1f} dB | BER={ber_psk:.5f}")
 
-        out["FM"][f"{col}_baseband"]      = np.round(norm(x), 6)
-        out["FM"][f"{col}_fm_demodulated"]= np.round(fm_pipeline(x), 6)
+        # Save one CSV per scheme
+        for scheme_name, data_dict in [("AM",  am_out),
+                                        ("FM",  fm_out),
+                                        ("ASK", ask_out),
+                                        ("FSK", fsk_out),
+                                        ("PSK", psk_out)]:
+            df_out   = pd.DataFrame(data_dict)
+            mid_cols = [c for c in df_out.columns
+                        if c not in ("timestamp", "current_state_binary")]
+            df_out   = df_out[["timestamp"] + mid_cols + ["current_state_binary"]]
+            out_path = os.path.join(OUT_DIR, f"{station}_{scheme_name}.csv")
+            df_out.to_csv(out_path, index=False)
+            print(f"  Saved {station}_{scheme_name}.csv  "
+                  f"({len(df_out)} rows x {len(df_out.columns)} cols)")
+            total_files += 1
 
-        ask_rec, ask_orig, _ = ask_pipeline(x)
-        out["ASK"][f"{col}_baseband"]     = np.round(norm(x), 6)
-        out["ASK"][f"{col}_original_bits"]= ask_orig
-        out["ASK"][f"{col}_ask_recovered"]= ask_rec
+    print(f"\nDone — {total_files} handoff files written to:\n  {OUT_DIR}")
 
-        fsk_rec, fsk_orig, _ = fsk_pipeline(x)
-        out["FSK"][f"{col}_baseband"]     = np.round(norm(x), 6)
-        out["FSK"][f"{col}_original_bits"]= fsk_orig
-        out["FSK"][f"{col}_fsk_recovered"]= fsk_rec
 
-        psk_rec, psk_orig, _ = psk_pipeline(x)
-        out["PSK"][f"{col}_baseband"]     = np.round(norm(x), 6)
-        out["PSK"][f"{col}_original_bits"]= psk_orig
-        out["PSK"][f"{col}_psk_recovered"]= psk_rec
-
-    for scheme in SCHEMES:
-        df_out = pd.DataFrame(out[scheme])
-        # Put timestamp and label at the edges
-        cols_order = (["timestamp"] +
-                      [c for c in df_out.columns if c not in ("timestamp","current_state_binary")] +
-                      ["current_state_binary"])
-        df_out = df_out[cols_order]
-        path = os.path.join(OUT_DIR, f"{station}_{scheme}.csv")
-        df_out.to_csv(path, index=False)
-        signal_data_cols = [c for c in df_out.columns if c not in ("timestamp","current_state_binary")]
-        print(f"  {station}_{scheme}.csv  — {len(df_out)} rows, signal cols: {signal_data_cols}")
-
-print(f"\nDone — {7*5} output files in {OUT_DIR}")
+if __name__ == "__main__":
+    generate_outputs()
