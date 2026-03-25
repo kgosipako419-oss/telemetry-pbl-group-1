@@ -2,17 +2,17 @@
 modulation.py — Student 3: Modulation Lead
 TELE 523 · Group 1 · Industrial Machine Condition Monitoring
 
-Implements AM, FM, ASK, FSK, and PSK modulation and demodulation on the
-FIR-filtered signals and feature vectors produced by Student 2 (Signal Processing Lead).
+Core modulation engine. Every station's signal columns pass through each of
+the 5 schemes (AM, FM, ASK, FSK, PSK) independently.
 
-Inputs (from data/processed/):
-  *_filtered.csv  — FIR-filtered time-series (baseband signal)
-  *_features.csv  — segment-level feature vectors (RMS, PSD, FFT, etc.)
+Inputs  (data/processed/):   {STATION}_filtered.csv
+Outputs (results/modulation/):
+  Plots   — {STATION}_{SCHEME}_{col}_plot.png   (one per scheme per signal col)
+  Metrics — modulation_results.csv             (SNR + BER for every combination)
+  Summary — modulation_summary.png             (cross-station comparison chart)
 
-Outputs (to results/modulation/):
-  *_modulation_results.csv  — SNR and BER per scheme per station
-  *_modulation_plots.png    — waveform comparison plots per station
-  modulation_summary.png    — cross-station BER comparison table
+Handoff CSVs for Student 4 are written by generate_modulation_outputs.py,
+which imports the modulation functions directly from this file.
 """
 
 import os
@@ -24,18 +24,21 @@ import matplotlib.pyplot as plt
 from scipy.signal import hilbert
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR       = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROCESSED_PATH = os.path.join(BASE_DIR, "data", "processed")
 OUT_DIR        = os.path.join(BASE_DIR, "results", "modulation")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# ── Global carrier / channel parameters ───────────────────────────────────────
-FS        = 0.5          # Hz — inherited from signal processing lead (sampling rate)
-FC        = 0.05         # Hz — carrier frequency (must be < Nyquist = 0.25 Hz)
-NOISE_STD = 0.05         # AWGN standard deviation for channel simulation
-BIT_RATE  = 0.05         # bits per sample (for digital schemes)
+# ── Shared parameters ─────────────────────────────────────────────────────────
+FS        = 0.5    # Hz  — sampling rate (inherited from Student 2)
+FC        = 0.05   # Hz  — carrier frequency (below Nyquist = 0.25 Hz)
+NOISE_STD = 0.05   # sigma — AWGN channel noise standard deviation
+MOD_INDEX = 0.8    # AM modulation index
+KF        = 0.1    # FM frequency deviation constant (Hz per unit amplitude)
+F0_FSK    = 0.03   # Hz  — FSK frequency for bit = 0
+F1_FSK    = 0.07   # Hz  — FSK frequency for bit = 1
 
-# Stations and their primary motor/speed signal columns (baseband source)
+# Signal columns to process per station (chosen by Student 2 as the baseband)
 SIGNAL_COLS = {
     "EC_1"  : ["i3_photoresistor", "current_task_duration"],
     "HBW_1" : ["m1_speed", "m2_speed", "m3_speed", "m4_speed", "current_task_duration"],
@@ -47,277 +50,314 @@ SIGNAL_COLS = {
 }
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 1 — HELPER UTILITIES
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# SECTION 1 — UTILITIES
+# =============================================================================
 
 def time_axis(n, fs=FS):
-    """Return a time array of n samples at rate fs (Hz)."""
+    """Return a uniformly-spaced time array of n samples at rate fs (Hz)."""
     return np.arange(n) / fs
 
 
-def carrier(n, fc=FC, fs=FS):
-    """Return a cosine carrier of length n."""
-    t = time_axis(n, fs)
-    return np.cos(2 * np.pi * fc * t)
-
-
-def awgn(signal, noise_std=NOISE_STD, seed=42):
-    """Add Additive White Gaussian Noise to a signal."""
-    rng = np.random.default_rng(seed)
-    return signal + rng.normal(0, noise_std, size=len(signal))
-
-
-def snr_db(clean, noisy):
-    """Compute Signal-to-Noise Ratio in dB."""
-    signal_power = np.mean(clean ** 2)
-    noise_power  = np.mean((clean - noisy) ** 2)
-    if noise_power == 0:
-        return float("inf")
-    if signal_power == 0:
-        return float("-inf")
-    return 10 * np.log10(signal_power / noise_power)
-
-
-def ber(original_bits, recovered_bits):
-    """
-    Bit Error Rate — fraction of bits that differ.
-    Both inputs must be integer arrays of the same length.
-    """
-    n = min(len(original_bits), len(recovered_bits))
-    return np.sum(original_bits[:n] != recovered_bits[:n]) / n
-
-
-def signal_to_bits(signal):
-    """
-    Convert a normalised [0,1] signal to a binary sequence by thresholding at 0.5.
-    Used as the 'digital message' for ASK / FSK / PSK.
-    """
-    clipped = np.clip(signal, 0, 1)
-    return (clipped > 0.5).astype(int)
-
-
 def normalise(signal):
-    """Min-max normalise a signal to [0, 1]. Safe against constant signals."""
+    """Min-max normalise a signal to [0, 1]. Returns zeros for constant signals."""
     lo, hi = signal.min(), signal.max()
     if hi - lo < 1e-12:
         return np.zeros_like(signal, dtype=float)
     return (signal - lo) / (hi - lo)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 2 — ANALOG MODULATION: AM and FM
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# ── 2.1 Amplitude Modulation (AM) ────────────────────────────────────────────
-
-def am_modulate(baseband, fc=FC, fs=FS, mod_index=0.8):
-    """
-    AM modulation:  s(t) = [1 + m·x(t)] · cos(2π·fc·t)
-    where x(t) is the normalised baseband signal and m is the modulation index.
-    """
-    x = normalise(baseband)
-    t = time_axis(len(x), fs)
-    c = np.cos(2 * np.pi * fc * t)
-    return (1 + mod_index * x) * c
+def awgn(signal, noise_std=NOISE_STD, seed=42):
+    """Add Additive White Gaussian Noise — models the wireless channel."""
+    rng = np.random.default_rng(seed)
+    return signal + rng.normal(0, noise_std, size=len(signal))
 
 
-def am_demodulate(modulated, fc=FC, fs=FS):
-    """
-    AM demodulation via envelope detection using the Hilbert transform.
-    Recovers the envelope |analytic_signal(s(t))| then removes the DC offset.
-    """
-    analytic = hilbert(modulated)
-    envelope = np.abs(analytic)
-    # Remove DC offset introduced by the carrier
-    envelope -= np.mean(envelope)
-    return envelope
+def signal_to_bits(signal):
+    """Convert a normalised [0,1] signal to binary by thresholding at 0.5."""
+    return (np.clip(normalise(signal), 0, 1) > 0.5).astype(int)
 
 
-# ── 2.2 Frequency Modulation (FM) ────────────────────────────────────────────
-
-def fm_modulate(baseband, fc=FC, fs=FS, kf=0.1):
-    """
-    FM modulation:  s(t) = cos(2π·fc·t + 2π·kf·∫x(τ)dτ)
-    kf is the frequency deviation constant (Hz per unit amplitude).
-    Carson's rule bandwidth ≈ 2(kf·A + W) where A=peak amplitude, W=message BW.
-    """
-    x = normalise(baseband)
-    t = time_axis(len(x), fs)
-    # Cumulative integral via cumulative sum (trapezoidal approximation at 1/fs)
-    integral = np.cumsum(x) / fs
-    return np.cos(2 * np.pi * fc * t + 2 * np.pi * kf * integral)
-
-
-def fm_demodulate(modulated, fc=FC, fs=FS):
-    """
-    FM demodulation via instantaneous frequency estimation.
-    Differentiates the phase of the analytic signal.
-    """
-    analytic  = hilbert(modulated)
-    phase     = np.unwrap(np.angle(analytic))
-    inst_freq = np.diff(phase) / (2 * np.pi / fs)
-    # Pad to original length
-    inst_freq = np.append(inst_freq, inst_freq[-1])
-    return inst_freq - fc   # remove carrier frequency offset
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 3 — DIGITAL MODULATION: ASK, FSK, PSK
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _samples_per_bit(n_samples, n_bits):
-    """Return integer samples-per-bit given total samples and bit count."""
+def _spb(n_samples, n_bits):
+    """Samples per bit — integer floor division, minimum 1."""
     return max(1, n_samples // max(1, n_bits))
 
 
-# ── 3.1 Amplitude Shift Keying (ASK / OOK) ───────────────────────────────────
+def snr_db(clean, noisy):
+    """Signal-to-Noise Ratio in dB between a clean and a noisy version."""
+    sp  = np.mean(clean ** 2)
+    np_ = np.mean((clean - noisy) ** 2)
+    if np_ == 0: return float("inf")
+    if sp  == 0: return float("-inf")
+    return 10 * np.log10(sp / np_)
+
+
+def ber(original_bits, recovered_bits):
+    """Bit Error Rate — fraction of bits that differ after recovery."""
+    n = min(len(original_bits), len(recovered_bits))
+    return float(np.sum(original_bits[:n] != recovered_bits[:n]) / n)
+
+
+def _expand_bits(bits, n_samples):
+    """Expand a bit array back to sample resolution (repeat each bit _spb times)."""
+    s   = _spb(n_samples, len(bits))
+    out = np.repeat(bits.astype(float), s)[:n_samples]
+    if len(out) < n_samples:
+        out = np.pad(out, (0, n_samples - len(out)), constant_values=out[-1])
+    return out
+
+
+# =============================================================================
+# SECTION 2 — AM  (Amplitude Modulation)
+# =============================================================================
+
+def am_modulate(baseband, fc=FC, fs=FS, mod_index=MOD_INDEX):
+    """
+    AM modulation:  s(t) = [1 + m*x(t)] * cos(2*pi*fc*t)
+    x(t) is the normalised baseband signal; m is the modulation index.
+    """
+    x = normalise(baseband)
+    t = time_axis(len(x), fs)
+    return (1 + mod_index * x) * np.cos(2 * np.pi * fc * t)
+
+
+def am_demodulate(received, fs=FS):
+    """
+    AM demodulation via Hilbert envelope detection.
+    Returns the envelope with DC offset removed, normalised to [0, 1].
+    """
+    env = np.abs(hilbert(received))
+    env -= env.mean()
+    return np.clip(normalise(env), 0, 1)
+
+
+# =============================================================================
+# SECTION 3 — FM  (Frequency Modulation)
+# =============================================================================
+
+def fm_modulate(baseband, fc=FC, fs=FS, kf=KF):
+    """
+    FM modulation:  s(t) = cos(2*pi*fc*t + 2*pi*kf * integral(x))
+    kf is the frequency deviation constant.
+    Carson's rule bandwidth = 2*(kf*A + W).
+    """
+    x     = normalise(baseband)
+    t     = time_axis(len(x), fs)
+    integ = np.cumsum(x) / fs
+    return np.cos(2 * np.pi * fc * t + 2 * np.pi * kf * integ)
+
+
+def fm_demodulate(received, fc=FC, fs=FS):
+    """
+    FM demodulation via instantaneous frequency (phase-differentiator).
+    Returns the recovered signal normalised to [0, 1].
+    """
+    phase     = np.unwrap(np.angle(hilbert(received)))
+    inst_freq = np.diff(phase) / (2 * np.pi / fs)
+    inst_freq = np.append(inst_freq, inst_freq[-1]) - fc
+    return np.clip(normalise(inst_freq), 0, 1)
+
+
+# =============================================================================
+# SECTION 4 — ASK  (Amplitude Shift Keying / OOK)
+# =============================================================================
 
 def ask_modulate(bits, n_samples, fc=FC, fs=FS):
     """
     Binary ASK (On-Off Keying):
-      bit=1 → carrier at full amplitude
-      bit=0 → carrier at zero amplitude
+      bit = 1 -> full-amplitude carrier
+      bit = 0 -> carrier off (zero)
     """
-    spb = _samples_per_bit(n_samples, len(bits))
     t   = time_axis(n_samples, fs)
-    c   = np.cos(2 * np.pi * fc * t)
-    env = np.repeat(bits.astype(float), spb)[:n_samples]
-    # Pad if needed
-    if len(env) < n_samples:
-        env = np.pad(env, (0, n_samples - len(env)), constant_values=env[-1])
-    return env * c
+    env = _expand_bits(bits, n_samples)
+    return env * np.cos(2 * np.pi * fc * t)
 
 
-def ask_demodulate(modulated, bits_orig, fc=FC, fs=FS):
+def ask_demodulate(received, bits_orig, fs=FS):
     """
-    ASK demodulation via envelope detection + threshold at 0.5.
-    Returns recovered bit array.
+    ASK demodulation via envelope detection + per-window threshold.
+    Returns:
+      recovered_bits — 0/1 array at bit resolution
+      envelope       — continuous envelope at sample resolution, normalised [0,1]
     """
-    n   = len(modulated)
-    spb = _samples_per_bit(n, len(bits_orig))
-    analytic = hilbert(modulated)
-    envelope = np.abs(analytic)
-    # Downsample: take mean of each bit window
-    n_bits = len(bits_orig)
+    n   = len(received)
+    nb  = len(bits_orig)
+    s   = _spb(n, nb)
+    env = np.abs(hilbert(received))
     recovered = np.array([
-        1 if np.mean(envelope[i*spb : (i+1)*spb]) > 0.5 else 0
-        for i in range(n_bits)
+        1 if np.mean(env[i*s : (i+1)*s]) > 0.5 else 0
+        for i in range(nb)
     ])
-    return recovered
+    return recovered, np.clip(normalise(env), 0, 1)
 
 
-# ── 3.2 Frequency Shift Keying (FSK) ─────────────────────────────────────────
+# =============================================================================
+# SECTION 5 — FSK  (Frequency Shift Keying)
+# =============================================================================
 
-def fsk_modulate(bits, n_samples, f0=0.03, f1=0.07, fs=FS):
+def fsk_modulate(bits, n_samples, f0=F0_FSK, f1=F1_FSK, fs=FS):
     """
     Binary FSK:
-      bit=0 → cosine at frequency f0
-      bit=1 → cosine at frequency f1
+      bit = 0 -> cosine at f0
+      bit = 1 -> cosine at f1
     """
-    spb = _samples_per_bit(n_samples, len(bits))
+    s   = _spb(n_samples, len(bits))
     t   = time_axis(n_samples, fs)
     out = np.zeros(n_samples)
     for i, b in enumerate(bits):
-        start = i * spb
-        end   = min(start + spb, n_samples)
-        freq  = f1 if b == 1 else f0
-        out[start:end] = np.cos(2 * np.pi * freq * t[start:end])
+        st, en = i*s, min((i+1)*s, n_samples)
+        out[st:en] = np.cos(2 * np.pi * (f1 if b else f0) * t[st:en])
     return out
 
 
-def fsk_demodulate(modulated, bits_orig, f0=0.03, f1=0.07, fs=FS):
+def fsk_demodulate(received, bits_orig, f0=F0_FSK, f1=F1_FSK, fs=FS):
     """
-    FSK demodulation via matched filter (correlate each window with f0 and f1 tones).
-    Decides bit based on which correlation is larger.
+    FSK demodulation via matched filter correlation.
+    Each bit window correlated with f0 and f1 reference tones;
+    larger absolute dot-product wins.
     """
-    n   = len(modulated)
-    spb = _samples_per_bit(n, len(bits_orig))
-    n_bits = len(bits_orig)
+    n   = len(received)
+    nb  = len(bits_orig)
+    s   = _spb(n, nb)
     t   = time_axis(n, fs)
-    ref0 = np.cos(2 * np.pi * f0 * t)
-    ref1 = np.cos(2 * np.pi * f1 * t)
-    recovered = np.zeros(n_bits, dtype=int)
-    for i in range(n_bits):
-        s, e = i * spb, min((i+1) * spb, n)
-        seg  = modulated[s:e]
-        c0   = np.abs(np.dot(seg, ref0[s:e]))
-        c1   = np.abs(np.dot(seg, ref1[s:e]))
-        recovered[i] = 1 if c1 > c0 else 0
+    r0  = np.cos(2 * np.pi * f0 * t)
+    r1  = np.cos(2 * np.pi * f1 * t)
+    recovered = np.zeros(nb, dtype=int)
+    for i in range(nb):
+        st, en = i*s, min((i+1)*s, n)
+        recovered[i] = 1 if abs(np.dot(received[st:en], r1[st:en])) > \
+                             abs(np.dot(received[st:en], r0[st:en])) else 0
     return recovered
 
 
-# ── 3.3 Phase Shift Keying (BPSK) ────────────────────────────────────────────
+# =============================================================================
+# SECTION 6 — PSK  (Binary Phase Shift Keying)
+# =============================================================================
 
 def psk_modulate(bits, n_samples, fc=FC, fs=FS):
     """
-    Binary PSK (BPSK):
-      bit=1 → cos(2π·fc·t)        (phase 0)
-      bit=0 → cos(2π·fc·t + π)    (phase π, i.e. inverted carrier)
+    BPSK:
+      bit = 1 -> cos(2*pi*fc*t)      (phase = 0)
+      bit = 0 -> cos(2*pi*fc*t + pi) (phase = pi, inverted carrier)
     """
-    spb  = _samples_per_bit(n_samples, len(bits))
-    t    = time_axis(n_samples, fs)
-    base = np.cos(2 * np.pi * fc * t)
-    phase_seq = np.repeat(np.where(bits == 1, 0, np.pi), spb)[:n_samples]
-    if len(phase_seq) < n_samples:
-        phase_seq = np.pad(phase_seq, (0, n_samples - len(phase_seq)), constant_values=phase_seq[-1])
+    t         = time_axis(n_samples, fs)
+    phase_seq = _expand_bits(np.where(bits == 1, 0.0, np.pi), n_samples)
     return np.cos(2 * np.pi * fc * t + phase_seq)
 
 
-def psk_demodulate(modulated, bits_orig, fc=FC, fs=FS):
+def psk_demodulate(received, bits_orig, fc=FC, fs=FS):
     """
-    BPSK demodulation via coherent detection (multiply by reference carrier, integrate).
-    Positive correlation → bit=1, negative → bit=0.
+    BPSK coherent demodulation: multiply by reference carrier, integrate per
+    bit window. Positive mean -> bit=1, negative -> bit=0.
     """
-    n   = len(modulated)
-    spb = _samples_per_bit(n, len(bits_orig))
+    n   = len(received)
+    nb  = len(bits_orig)
+    s   = _spb(n, nb)
     t   = time_axis(n, fs)
     ref = np.cos(2 * np.pi * fc * t)
-    product = modulated * ref
-    n_bits = len(bits_orig)
-    recovered = np.zeros(n_bits, dtype=int)
-    for i in range(n_bits):
-        s, e = i * spb, min((i+1) * spb, n)
-        recovered[i] = 1 if np.mean(product[s:e]) > 0 else 0
+    product = received * ref
+    recovered = np.zeros(nb, dtype=int)
+    for i in range(nb):
+        st, en = i*s, min((i+1)*s, n)
+        recovered[i] = 1 if np.mean(product[st:en]) > 0 else 0
     return recovered
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 4 — CHANNEL SIMULATION
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# SECTION 7 — CHANNEL
+# =============================================================================
 
-def simulate_channel(modulated, noise_std=NOISE_STD):
-    """
-    AWGN channel model.
-    Adds Gaussian noise to represent wireless transmission impairments.
-    SNR can be computed via snr_db(modulated, received).
-    """
+def channel(modulated, noise_std=NOISE_STD):
+    """AWGN channel — adds Gaussian noise to simulate wireless transmission."""
     return awgn(modulated, noise_std)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 5 — PER-STATION PROCESSING PIPELINE
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# SECTION 8 — PER-SCHEME PIPELINE RUNNERS
+# Each function runs one complete scheme independently for one signal column.
+# These are also imported by generate_modulation_outputs.py.
+# =============================================================================
+
+def run_am(baseband):
+    """
+    Full AM pipeline for one signal column.
+    Returns: (modulated, received, demodulated, snr_dB)
+    """
+    mod = am_modulate(baseband)
+    rx  = channel(mod)
+    dem = am_demodulate(rx)
+    return mod, rx, dem, snr_db(mod, rx)
+
+
+def run_fm(baseband):
+    """
+    Full FM pipeline for one signal column.
+    Returns: (modulated, received, demodulated, snr_dB)
+    """
+    mod = fm_modulate(baseband)
+    rx  = channel(mod)
+    dem = fm_demodulate(rx)
+    return mod, rx, dem, snr_db(mod, rx)
+
+
+def run_ask(baseband):
+    """
+    Full ASK pipeline for one signal column.
+    Returns: (modulated, received, recovered_bits, envelope, snr_dB, ber_val, original_bits)
+    """
+    bits     = signal_to_bits(baseband)
+    mod      = ask_modulate(bits, len(baseband))
+    rx       = channel(mod)
+    rec, env = ask_demodulate(rx, bits)
+    return mod, rx, rec, env, snr_db(mod, rx), ber(bits, rec), bits
+
+
+def run_fsk(baseband):
+    """
+    Full FSK pipeline for one signal column.
+    Returns: (modulated, received, recovered_bits, snr_dB, ber_val, original_bits)
+    """
+    bits = signal_to_bits(baseband)
+    mod  = fsk_modulate(bits, len(baseband))
+    rx   = channel(mod)
+    rec  = fsk_demodulate(rx, bits)
+    return mod, rx, rec, snr_db(mod, rx), ber(bits, rec), bits
+
+
+def run_psk(baseband):
+    """
+    Full PSK pipeline for one signal column.
+    Returns: (modulated, received, recovered_bits, snr_dB, ber_val, original_bits)
+    """
+    bits = signal_to_bits(baseband)
+    mod  = psk_modulate(bits, len(baseband))
+    rx   = channel(mod)
+    rec  = psk_demodulate(rx, bits)
+    return mod, rx, rec, snr_db(mod, rx), ber(bits, rec), bits
+
+
+# =============================================================================
+# SECTION 9 — STATION PROCESSING
+# Outer loop = schemes, inner loop = signal columns.
+# This makes it explicit that every column passes through every scheme
+# as a completely independent pipeline run.
+# =============================================================================
 
 def process_station(station):
     """
-    Full modulation pipeline for one station.
+    For one station, run every signal column through every scheme independently.
 
-    For each signal column:
-      1. Load the FIR-filtered time-series (baseband signal)
-      2. Apply AM, FM, ASK, FSK, PSK modulation
-      3. Pass through AWGN channel
-      4. Demodulate and compute SNR / BER
-      5. Save waveform plot
+    Loop order:  for each scheme -> for each signal column
+      modulate -> channel -> demodulate -> compute SNR/BER -> save plot
 
-    Returns a list of result dicts (one per signal column per scheme).
+    Returns a list of metric dicts (one per scheme x signal column combination).
     """
-    filtered_path = os.path.join(PROCESSED_PATH, f"{station}_filtered.csv")
-    if not os.path.exists(filtered_path):
-        print(f"  [SKIP] {station}_filtered.csv not found — skipping")
+    fpath = os.path.join(PROCESSED_PATH, f"{station}_filtered.csv")
+    if not os.path.exists(fpath):
+        print(f"  [SKIP] {station}_filtered.csv not found")
         return []
 
-    df = pd.read_csv(filtered_path, parse_dates=["timestamp"])
+    df       = pd.read_csv(fpath, parse_dates=["timestamp"])
     sig_cols = [c for c in SIGNAL_COLS.get(station, []) if c in df.columns]
     if not sig_cols:
         print(f"  [SKIP] No matching signal columns for {station}")
@@ -325,299 +365,238 @@ def process_station(station):
 
     results = []
 
-    for col in sig_cols:
-        baseband = df[col].fillna(0).to_numpy(dtype=float)
-        if len(baseband) < 30:
-            continue
+    # Outer loop over schemes — makes independence explicit
+    for scheme in ["AM", "FM", "ASK", "FSK", "PSK"]:
+        print(f"  [{scheme}]")
+        for col in sig_cols:
+            baseband = df[col].fillna(0).to_numpy(dtype=float)
+            if len(baseband) < 30:
+                continue
 
-        n      = len(baseband)
-        bits   = signal_to_bits(normalise(baseband))
-        n_bits = len(bits)
+            row = {"station": station, "signal_col": col, "scheme": scheme}
 
-        # ── Modulate ─────────────────────────────────────────────────────────
-        am_mod  = am_modulate(baseband)
-        fm_mod  = fm_modulate(baseband)
-        ask_mod = ask_modulate(bits, n)
-        fsk_mod = fsk_modulate(bits, n)
-        psk_mod = psk_modulate(bits, n)
+            if scheme == "AM":
+                mod, rx, dem, snr = run_am(baseband)
+                row["SNR_dB"] = round(snr, 3)
+                row["BER"]    = None
+                _plot_scheme(station, col, "AM", baseband, mod, rx, dem,
+                             label_mod="AM modulated",
+                             label_demod="AM demodulated (envelope)")
 
-        # ── Channel (AWGN) ───────────────────────────────────────────────────
-        am_rx  = simulate_channel(am_mod)
-        fm_rx  = simulate_channel(fm_mod)
-        ask_rx = simulate_channel(ask_mod)
-        fsk_rx = simulate_channel(fsk_mod)
-        psk_rx = simulate_channel(psk_mod)
+            elif scheme == "FM":
+                mod, rx, dem, snr = run_fm(baseband)
+                row["SNR_dB"] = round(snr, 3)
+                row["BER"]    = None
+                _plot_scheme(station, col, "FM", baseband, mod, rx, dem,
+                             label_mod="FM modulated",
+                             label_demod="FM demodulated (inst. freq.)")
 
-        # ── Demodulate ───────────────────────────────────────────────────────
-        am_demod  = am_demodulate(am_rx)
-        fm_demod  = fm_demodulate(fm_rx)
-        ask_bits  = ask_demodulate(ask_rx, bits)
-        fsk_bits  = fsk_demodulate(fsk_rx, bits)
-        psk_bits  = psk_demodulate(psk_rx, bits)
+            elif scheme == "ASK":
+                mod, rx, rec, env, snr, ber_val, orig_bits = run_ask(baseband)
+                dem = _expand_bits(rec, len(baseband))
+                row["SNR_dB"] = round(snr, 3)
+                row["BER"]    = round(ber_val, 5)
+                _plot_scheme(station, col, "ASK", baseband, mod, rx, dem,
+                             label_mod="ASK modulated (OOK)",
+                             label_demod="ASK recovered bits")
 
-        # ── Metrics ──────────────────────────────────────────────────────────
-        am_snr  = snr_db(am_mod, am_rx)
-        fm_snr  = snr_db(fm_mod, fm_rx)
-        ask_snr = snr_db(ask_mod, ask_rx)
-        fsk_snr = snr_db(fsk_mod, fsk_rx)
-        psk_snr = snr_db(psk_mod, psk_rx)
+            elif scheme == "FSK":
+                mod, rx, rec, snr, ber_val, orig_bits = run_fsk(baseband)
+                dem = _expand_bits(rec, len(baseband))
+                row["SNR_dB"] = round(snr, 3)
+                row["BER"]    = round(ber_val, 5)
+                _plot_scheme(station, col, "FSK", baseband, mod, rx, dem,
+                             label_mod=f"FSK modulated (f0={F0_FSK}Hz, f1={F1_FSK}Hz)",
+                             label_demod="FSK recovered bits")
 
-        ask_ber = ber(bits, ask_bits)
-        fsk_ber = ber(bits, fsk_bits)
-        psk_ber = ber(bits, psk_bits)
+            elif scheme == "PSK":
+                mod, rx, rec, snr, ber_val, orig_bits = run_psk(baseband)
+                dem = _expand_bits(rec, len(baseband))
+                row["SNR_dB"] = round(snr, 3)
+                row["BER"]    = round(ber_val, 5)
+                _plot_scheme(station, col, "PSK", baseband, mod, rx, dem,
+                             label_mod="PSK modulated (BPSK)",
+                             label_demod="PSK recovered bits")
 
-        results.append({
-            "station"   : station,
-            "signal_col": col,
-            "AM_SNR_dB" : round(am_snr,  3),
-            "FM_SNR_dB" : round(fm_snr,  3),
-            "ASK_SNR_dB": round(ask_snr, 3),
-            "FSK_SNR_dB": round(fsk_snr, 3),
-            "PSK_SNR_dB": round(psk_snr, 3),
-            "ASK_BER"   : round(ask_ber, 5),
-            "FSK_BER"   : round(fsk_ber, 5),
-            "PSK_BER"   : round(psk_ber, 5),
-        })
-
-        # ── Waveform Plot ─────────────────────────────────────────────────────
-        _plot_waveforms(
-            station, col, baseband,
-            am_mod, am_rx, am_demod,
-            fm_mod, fm_rx, fm_demod,
-            ask_mod, ask_rx,
-            fsk_mod, fsk_rx,
-            psk_mod, psk_rx,
-            bits, ask_bits, fsk_bits, psk_bits
-        )
-
-        print(f"  {station} · {col} | AM SNR={am_snr:.1f}dB | "
-              f"ASK BER={ask_ber:.4f} | FSK BER={fsk_ber:.4f} | PSK BER={psk_ber:.4f}")
+            results.append(row)
+            ber_str = f"BER={row['BER']:.5f}" if row["BER"] is not None else "BER=N/A (analog)"
+            print(f"      {col:30s} SNR={row['SNR_dB']:6.1f} dB | {ber_str}")
 
     return results
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 6 — PLOTTING
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# SECTION 10 — PLOTTING
+# =============================================================================
 
-BG   = "#0d1117"
-TEXT = "#e6edf3"
-COLS = {
+_BG      = "#0d1117"
+_TEXT    = "#e6edf3"
+_PALETTE = {
     "baseband" : "#58a6ff",
-    "AM"       : "#3fb950",
-    "FM"       : "#f0883e",
-    "ASK"      : "#bc8cff",
-    "FSK"      : "#ff7b72",
-    "PSK"      : "#ffa657",
-    "rx"       : "#8b949e",
-    "demod"    : "#56d364",
+    "modulated": "#3fb950",
+    "received" : "#8b949e",
+    "demod"    : "#ffa657",
 }
 
 
-def _plot_waveforms(station, col,
-                    baseband,
-                    am_mod, am_rx, am_demod,
-                    fm_mod, fm_rx, fm_demod,
-                    ask_mod, ask_rx,
-                    fsk_mod, fsk_rx,
-                    psk_mod, psk_rx,
-                    bits, ask_bits, fsk_bits, psk_bits):
+def _plot_scheme(station, col, scheme, baseband,
+                 mod, rx, dem,
+                 label_mod="modulated",
+                 label_demod="demodulated"):
     """
-    Generate a 5-row diagnostic waveform plot for one signal column.
-    Rows: baseband | AM | FM | ASK | FSK | PSK
-    Each row shows: modulated (clean), received (noisy), demodulated/recovered.
+    3-row diagnostic plot for one scheme x one signal column.
+    Row 1: normalised baseband
+    Row 2: modulated (clean) vs received (noisy after channel)
+    Row 3: demodulated / recovered output
     """
-    # Use only the first 200 samples for readability
-    N   = min(200, len(baseband))
-    t   = np.arange(N)
-    n_b = min(N, len(bits))
+    N = min(200, len(baseband))
+    t = np.arange(N)
 
-    fig, axes = plt.subplots(6, 1, figsize=(16, 18), facecolor=BG)
+    fig, axes = plt.subplots(3, 1, figsize=(14, 8), facecolor=_BG)
     fig.suptitle(
-        f"Modulation Waveforms — {station} · {col}\n"
-        f"carrier fc={FC} Hz | AWGN σ={NOISE_STD}",
-        fontsize=14, fontweight="bold", color=TEXT, y=0.995
+        f"{station} · {col} — {scheme} Modulation\n"
+        f"fc={FC} Hz | AWGN sigma={NOISE_STD} | fs={FS} Hz",
+        fontsize=12, fontweight="bold", color=_TEXT, y=1.00
     )
 
-    def style_ax(ax, title, ylabel="Amplitude"):
+    def style(ax, title):
         ax.set_facecolor("#161b22")
-        ax.set_title(title, color=TEXT, fontsize=10, loc="left", pad=6)
-        ax.set_ylabel(ylabel, color="#8b949e", fontsize=8)
+        ax.set_title(title, color=_TEXT, fontsize=9, loc="left", pad=4)
         ax.tick_params(colors="#8b949e", labelsize=7)
-        for spine in ax.spines.values():
-            spine.set_color("#30363d")
+        for sp in ax.spines.values():
+            sp.set_color("#30363d")
+        ax.set_ylabel("Amplitude", color="#8b949e", fontsize=8)
 
-    # Row 0 — Baseband
-    axes[0].plot(t, normalise(baseband[:N]), color=COLS["baseband"], lw=1.2, label="baseband (normalised)")
-    axes[0].step(t[:n_b], bits[:n_b], color="#ffa657", lw=0.8, alpha=0.5, label="bits (threshold=0.5)")
-    axes[0].legend(fontsize=7, facecolor="#1c2128", labelcolor=TEXT)
-    style_ax(axes[0], "Baseband Signal (FIR-filtered, normalised)")
+    axes[0].plot(t, normalise(baseband[:N]),
+                 color=_PALETTE["baseband"], lw=1.2, label="baseband (normalised)")
+    axes[0].legend(fontsize=7, facecolor="#1c2128", labelcolor=_TEXT)
+    style(axes[0], "Baseband signal (FIR-filtered input from Student 2)")
 
-    # Row 1 — AM
-    axes[1].plot(t, am_mod[:N],   color=COLS["AM"],    lw=0.9, alpha=0.9, label="AM modulated")
-    axes[1].plot(t, am_rx[:N],    color=COLS["rx"],    lw=0.7, alpha=0.5, label="received (AWGN)")
-    axes[1].plot(t, am_demod[:N], color=COLS["demod"], lw=1.0, alpha=0.8, label="AM demodulated (envelope)")
-    axes[1].legend(fontsize=7, facecolor="#1c2128", labelcolor=TEXT)
-    style_ax(axes[1], "AM — Amplitude Modulation (index=0.8)")
+    axes[1].plot(t, mod[:N], color=_PALETTE["modulated"], lw=0.9, alpha=0.9, label=label_mod)
+    axes[1].plot(t, rx[:N],  color=_PALETTE["received"],  lw=0.7, alpha=0.5,
+                 label="received after AWGN channel")
+    axes[1].legend(fontsize=7, facecolor="#1c2128", labelcolor=_TEXT)
+    style(axes[1], f"{scheme} — Modulated & Channel Output")
 
-    # Row 2 — FM
-    axes[2].plot(t, fm_mod[:N],   color=COLS["FM"],    lw=0.9, alpha=0.9, label="FM modulated")
-    axes[2].plot(t, fm_rx[:N],    color=COLS["rx"],    lw=0.7, alpha=0.5, label="received (AWGN)")
-    axes[2].plot(t, fm_demod[:N], color=COLS["demod"], lw=1.0, alpha=0.8, label="FM demodulated (inst. freq.)")
-    axes[2].legend(fontsize=7, facecolor="#1c2128", labelcolor=TEXT)
-    style_ax(axes[2], "FM — Frequency Modulation (kf=0.1)")
+    axes[2].plot(t, dem[:N], color=_PALETTE["demod"], lw=1.1, label=label_demod)
+    axes[2].legend(fontsize=7, facecolor="#1c2128", labelcolor=_TEXT)
+    axes[2].set_xlabel("Sample index", color="#8b949e", fontsize=8)
+    style(axes[2], f"{scheme} — Demodulated / Recovered Output (handoff to Student 4)")
 
-    # Row 3 — ASK
-    spb_ask = max(1, N // n_b)
-    ask_rec_ext = np.repeat(ask_bits[:n_b], spb_ask)[:N]
-    axes[3].plot(t, ask_mod[:N],    color=COLS["ASK"],   lw=0.9, alpha=0.9, label="ASK modulated (OOK)")
-    axes[3].plot(t, ask_rx[:N],     color=COLS["rx"],    lw=0.7, alpha=0.5, label="received (AWGN)")
-    axes[3].step(t, ask_rec_ext,    color=COLS["demod"], lw=1.2, alpha=0.9, label="ASK demodulated bits")
-    axes[3].legend(fontsize=7, facecolor="#1c2128", labelcolor=TEXT)
-    style_ax(axes[3], "ASK — Amplitude Shift Keying")
-
-    # Row 4 — FSK
-    fsk_rec_ext = np.repeat(fsk_bits[:n_b], spb_ask)[:N]
-    axes[4].plot(t, fsk_mod[:N],    color=COLS["FSK"],   lw=0.9, alpha=0.9, label="FSK modulated (f0=0.03Hz, f1=0.07Hz)")
-    axes[4].plot(t, fsk_rx[:N],     color=COLS["rx"],    lw=0.7, alpha=0.5, label="received (AWGN)")
-    axes[4].step(t, fsk_rec_ext,    color=COLS["demod"], lw=1.2, alpha=0.9, label="FSK demodulated bits")
-    axes[4].legend(fontsize=7, facecolor="#1c2128", labelcolor=TEXT)
-    style_ax(axes[4], "FSK — Frequency Shift Keying")
-
-    # Row 5 — PSK
-    psk_rec_ext = np.repeat(psk_bits[:n_b], spb_ask)[:N]
-    axes[5].plot(t, psk_mod[:N],    color=COLS["PSK"],   lw=0.9, alpha=0.9, label="PSK modulated (BPSK)")
-    axes[5].plot(t, psk_rx[:N],     color=COLS["rx"],    lw=0.7, alpha=0.5, label="received (AWGN)")
-    axes[5].step(t, psk_rec_ext,    color=COLS["demod"], lw=1.2, alpha=0.9, label="PSK demodulated bits")
-    axes[5].legend(fontsize=7, facecolor="#1c2128", labelcolor=TEXT)
-    axes[5].set_xlabel("Sample index", color="#8b949e", fontsize=8)
-    style_ax(axes[5], "PSK — Binary Phase Shift Keying (BPSK)")
-
-    plt.tight_layout(rect=[0, 0, 1, 0.99])
-    fname = os.path.join(OUT_DIR, f"{station}_{col}_modulation_plots.png")
-    plt.savefig(fname, dpi=150, bbox_inches="tight", facecolor=BG)
+    plt.tight_layout()
+    fname = os.path.join(OUT_DIR, f"{station}_{scheme}_{col}_plot.png")
+    plt.savefig(fname, dpi=140, bbox_inches="tight", facecolor=_BG)
     plt.close()
-    print(f"    → Plot saved: {fname}")
 
 
-def plot_ber_comparison(all_results):
-    """
-    Cross-station BER and SNR comparison bar chart.
-    One figure with subplots for BER (ASK/FSK/PSK) and SNR (AM/FM/ASK/FSK/PSK).
-    """
+def plot_summary(all_results):
+    """Cross-station SNR and BER comparison bar chart."""
     if not all_results:
         return
 
-    df = pd.DataFrame(all_results)
-    # Aggregate: mean per station
-    agg = df.groupby("station")[
-        ["AM_SNR_dB","FM_SNR_dB","ASK_SNR_dB","FSK_SNR_dB","PSK_SNR_dB",
-         "ASK_BER","FSK_BER","PSK_BER"]
-    ].mean().reset_index()
-
-    stations = agg["station"].tolist()
+    df       = pd.DataFrame(all_results)
+    stations = sorted(df["station"].unique())
+    schemes  = ["AM", "FM", "ASK", "FSK", "PSK"]
     x = np.arange(len(stations))
     w = 0.15
+    colors = ["#3fb950", "#f0883e", "#bc8cff", "#ff7b72", "#ffa657"]
 
-    fig, axes = plt.subplots(1, 2, figsize=(18, 7), facecolor=BG)
-    fig.suptitle(
-        "Modulation Performance Comparison — All Stations\nTELE 523 · Group 1",
-        fontsize=15, fontweight="bold", color=TEXT
-    )
+    fig, axes = plt.subplots(1, 2, figsize=(18, 6), facecolor=_BG)
+    fig.suptitle("Modulation Performance Summary — All Stations\nTELE 523 · Group 1",
+                 fontsize=14, fontweight="bold", color=_TEXT)
 
-    # ── SNR plot ─────────────────────────────────────────────────────────────
     ax1 = axes[0]
     ax1.set_facecolor("#161b22")
-    schemes_snr = ["AM_SNR_dB","FM_SNR_dB","ASK_SNR_dB","FSK_SNR_dB","PSK_SNR_dB"]
-    labels_snr  = ["AM","FM","ASK","FSK","PSK"]
-    pal         = [COLS["AM"], COLS["FM"], COLS["ASK"], COLS["FSK"], COLS["PSK"]]
-    for i, (col, lbl, c) in enumerate(zip(schemes_snr, labels_snr, pal)):
-        bars = ax1.bar(x + i*w, agg[col], w, label=lbl, color=c, alpha=0.85, edgecolor="#ffffff11")
-        for bar in bars:
-            h = bar.get_height()
-            ax1.text(bar.get_x()+bar.get_width()/2, h+0.3, f"{h:.1f}",
-                     ha="center", va="bottom", color=TEXT, fontsize=6.5)
+    for i, (s, c) in enumerate(zip(schemes, colors)):
+        vals = [df[(df.station == st) & (df.scheme == s)]["SNR_dB"].mean()
+                for st in stations]
+        bars = ax1.bar(x + i*w, vals, w, label=s, color=c, alpha=0.85,
+                       edgecolor="#ffffff11")
+        for b in bars:
+            ax1.text(b.get_x() + b.get_width()/2, b.get_height() + 0.2,
+                     f"{b.get_height():.1f}", ha="center", va="bottom",
+                     color=_TEXT, fontsize=6)
     ax1.set_xticks(x + 2*w)
-    ax1.set_xticklabels(stations, color=TEXT, fontsize=9)
+    ax1.set_xticklabels(stations, color=_TEXT, fontsize=9)
     ax1.set_ylabel("SNR (dB)", color="#8b949e")
-    ax1.set_title("Signal-to-Noise Ratio per Station & Scheme", color=TEXT, fontsize=11)
-    ax1.legend(facecolor="#1c2128", labelcolor=TEXT, fontsize=9)
+    ax1.set_title("Signal-to-Noise Ratio per Station & Scheme", color=_TEXT, fontsize=11)
+    ax1.legend(facecolor="#1c2128", labelcolor=_TEXT, fontsize=9)
     ax1.tick_params(colors="#8b949e")
-    for sp in ax1.spines.values(): sp.set_color("#30363d")
+    for sp in ax1.spines.values():
+        sp.set_color("#30363d")
 
-    # ── BER plot ─────────────────────────────────────────────────────────────
     ax2 = axes[1]
     ax2.set_facecolor("#161b22")
-    schemes_ber = ["ASK_BER","FSK_BER","PSK_BER"]
-    labels_ber  = ["ASK","FSK","PSK"]
-    pal_ber     = [COLS["ASK"], COLS["FSK"], COLS["PSK"]]
+    dig_schemes = ["ASK", "FSK", "PSK"]
+    dig_colors  = ["#bc8cff", "#ff7b72", "#ffa657"]
     w2 = 0.25
-    for i, (col, lbl, c) in enumerate(zip(schemes_ber, labels_ber, pal_ber)):
-        bars = ax2.bar(x + i*w2, agg[col], w2, label=lbl, color=c, alpha=0.85, edgecolor="#ffffff11")
-        for bar in bars:
-            h = bar.get_height()
-            ax2.text(bar.get_x()+bar.get_width()/2, h+0.0005, f"{h:.4f}",
-                     ha="center", va="bottom", color=TEXT, fontsize=6.5)
+    for i, (s, c) in enumerate(zip(dig_schemes, dig_colors)):
+        vals = [df[(df.station == st) & (df.scheme == s)]["BER"].mean()
+                for st in stations]
+        bars = ax2.bar(x + i*w2, vals, w2, label=s, color=c, alpha=0.85,
+                       edgecolor="#ffffff11")
+        for b in bars:
+            ax2.text(b.get_x() + b.get_width()/2, b.get_height() + 0.0005,
+                     f"{b.get_height():.4f}", ha="center", va="bottom",
+                     color=_TEXT, fontsize=6)
     ax2.set_xticks(x + w2)
-    ax2.set_xticklabels(stations, color=TEXT, fontsize=9)
+    ax2.set_xticklabels(stations, color=_TEXT, fontsize=9)
     ax2.set_ylabel("Bit Error Rate (BER)", color="#8b949e")
-    ax2.set_title("BER per Station & Digital Scheme", color=TEXT, fontsize=11)
-    ax2.legend(facecolor="#1c2128", labelcolor=TEXT, fontsize=9)
+    ax2.set_title("BER per Station & Digital Scheme", color=_TEXT, fontsize=11)
+    ax2.legend(facecolor="#1c2128", labelcolor=_TEXT, fontsize=9)
     ax2.tick_params(colors="#8b949e")
-    for sp in ax2.spines.values(): sp.set_color("#30363d")
+    for sp in ax2.spines.values():
+        sp.set_color("#30363d")
 
     plt.tight_layout()
     out = os.path.join(OUT_DIR, "modulation_summary.png")
-    plt.savefig(out, dpi=150, bbox_inches="tight", facecolor=BG)
+    plt.savefig(out, dpi=150, bbox_inches="tight", facecolor=_BG)
     plt.close()
-    print(f"\nSummary plot saved → {out}")
+    print(f"Summary plot saved -> {out}")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 7 — MAIN ENTRY POINT
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# SECTION 11 — MAIN
+# =============================================================================
 
 def main():
-    print("=" * 65)
-    print("TELE 523 · Modulation Lead — Student 3")
-    print("Industrial Machine Condition Monitoring")
-    print("=" * 65)
-    print(f"\nCarrier frequency : {FC} Hz")
-    print(f"Sampling rate     : {FS} Hz")
-    print(f"Nyquist limit     : {FS/2} Hz")
-    print(f"AWGN noise σ      : {NOISE_STD}")
-    print(f"Output directory  : {OUT_DIR}\n")
+    print("=" * 70)
+    print("TELE 523 - Modulation Lead (Student 3)")
+    print("Each station x each signal column x each scheme — independently")
+    print("=" * 70)
+    print(f"  fc={FC} Hz | fs={FS} Hz | Nyquist={FS/2} Hz | AWGN sigma={NOISE_STD}\n")
 
     all_results = []
 
     for station in sorted(SIGNAL_COLS.keys()):
-        print(f"\n── Processing {station} ─────────────────────────────────────")
+        print(f"\n-- {station} " + "-"*50)
         results = process_station(station)
         all_results.extend(results)
 
     if not all_results:
-        print("\n[ERROR] No results — check that data/processed/ contains *_filtered.csv files.")
+        print("\n[ERROR] No results — check data/processed/ for *_filtered.csv files.")
         return
 
-    # ── Save metrics CSV ─────────────────────────────────────────────────────
-    results_df = pd.DataFrame(all_results)
+    df      = pd.DataFrame(all_results)
     csv_out = os.path.join(OUT_DIR, "modulation_results.csv")
-    results_df.to_csv(csv_out, index=False)
-    print(f"\nResults CSV saved → {csv_out}")
+    df.to_csv(csv_out, index=False)
+    print(f"\nMetrics CSV saved -> {csv_out}")
 
-    # ── Summary comparison plot ───────────────────────────────────────────────
-    plot_ber_comparison(all_results)
+    plot_summary(all_results)
 
-    # ── Print summary table ───────────────────────────────────────────────────
-    print("\n" + "=" * 65)
-    print("MODULATION RESULTS SUMMARY")
-    print("=" * 65)
-    summary = results_df.groupby("station")[
-        ["AM_SNR_dB","FM_SNR_dB","ASK_SNR_dB","FSK_SNR_dB","PSK_SNR_dB",
-         "ASK_BER","FSK_BER","PSK_BER"]
-    ].mean().round(4)
-    print(summary.to_string())
-    print("\nPhase 3 — Modulation complete.")
+    print("\n" + "=" * 70)
+    print("SUMMARY — mean SNR (dB) per station x scheme")
+    pivot_snr = df.pivot_table(
+        values="SNR_dB", index="station", columns="scheme", aggfunc="mean"
+    ).round(2)
+    print(pivot_snr.to_string())
+
+    print("\nBER (digital schemes only):")
+    pivot_ber = df[df["BER"].notna()].pivot_table(
+        values="BER", index="station", columns="scheme", aggfunc="mean"
+    ).round(5)
+    print(pivot_ber.to_string())
+    print("\nModulation phase complete.")
 
 
 if __name__ == "__main__":
