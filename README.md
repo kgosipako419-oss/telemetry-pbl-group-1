@@ -211,7 +211,7 @@ telemetry_pbl_group1/
 
 | Property | Details |
 |---|---|
-| Source | https://github.com/iml130/fischertechnik-dataset |
+| Source | https://zenodo.org/records/7612698 |
 | Origin | University of St. Gallen, Institute of Technology Management |
 | Format | Newline-delimited JSON log files |
 | Signals | IMU (accelerometer + gyroscope), UWB position, actuator states |
