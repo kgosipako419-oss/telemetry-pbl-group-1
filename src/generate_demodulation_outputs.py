@@ -2,248 +2,158 @@
 generate_demodulation_outputs.py — Student 3: Modulation Lead
 TELE 523 · Group 1 · Industrial Machine Condition Monitoring
 
-Produces the Student 4 handoff files — 35 CSVs (5 schemes × 7 stations).
+Produces 70 demodulation handoff CSV files for Student 4.
+  7 stations × 2 sources (filtered + features) × 5 schemes = 70 files
 
-Imports all pipeline functions from demodulation.py.
-No modulation or demodulation math lives here — this script only handles
-loading inputs, calling pipelines, and saving outputs.
+Output naming:
+  {STATION}_filtered_{SCHEME}_demod.csv
+  {STATION}_features_{SCHEME}_demod.csv
 
-Pipeline for each file:
-  baseband signal → modulate → AWGN channel → DEMODULATE → save CSV
-
-Output location: results/demodulation/output/
-Output files (35 total):
-  {STATION}_AM_demod.csv   — AM  recovered analog signal [0,1]
-  {STATION}_FM_demod.csv   — FM  recovered analog signal [0,1]
-  {STATION}_ASK_demod.csv  — ASK recovered bits {0,1} + original bits
-  {STATION}_FSK_demod.csv  — FSK recovered bits {0,1} + original bits
-  {STATION}_PSK_demod.csv  — PSK recovered bits {0,1} + original bits
-
-Column layout per file type:
+Column layout:
   Analog (AM, FM):
-    timestamp | {col}_baseband | {col}_{scheme}_demodulated | ... | current_state_binary
+    index_col | {col}_baseband | {col}_{scheme}_demodulated | ... | current_state_binary
 
   Digital (ASK, FSK, PSK):
-    timestamp | {col}_baseband | {col}_original_bits | {col}_{scheme}_recovered | ... | current_state_binary
+    index_col | {col}_baseband | {col}_original_bits | {col}_{scheme}_recovered | ... | current_state_binary
 
-What Student 4 does with these files:
-  AM / FM  → uniform quantization (e.g. 8-bit PCM) on *_demodulated columns
-  ASK / FSK / PSK → line coding (NRZ-L, Manchester) on *_recovered columns,
-                    then PCM bitstream integrity checks
+Student 4 usage:
+  AM/FM  -> uniform quantization + PCM encoding on *_demodulated columns
+  ASK/FSK/PSK -> NRZ-L / Manchester line coding on *_recovered columns
 """
 
-import os
-import sys
+import os, sys
 import numpy as np
 import pandas as pd
 
-# ── Import pipeline functions from demodulation.py ────────────────────────────
 try:
     from demodulation import (
-        SIGNAL_COLS, PROCESSED_PATH,
+        STATIONS, SIGNAL_COLS_FILTERED, SIGNAL_COLS_FEATURES, PROCESSED_PATH,
         normalise, _expand_bits,
-        pipeline_am, pipeline_fm,
-        pipeline_ask, pipeline_fsk, pipeline_psk,
+        pipeline_am, pipeline_fm, pipeline_ask, pipeline_fsk, pipeline_psk,
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from demodulation import (
-        SIGNAL_COLS, PROCESSED_PATH,
+        STATIONS, SIGNAL_COLS_FILTERED, SIGNAL_COLS_FEATURES, PROCESSED_PATH,
         normalise, _expand_bits,
-        pipeline_am, pipeline_fm,
-        pipeline_ask, pipeline_fsk, pipeline_psk,
+        pipeline_am, pipeline_fm, pipeline_ask, pipeline_fsk, pipeline_psk,
     )
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR  = os.path.join(BASE_DIR, "results", "demodulation", "output")
 os.makedirs(OUT_DIR, exist_ok=True)
 
+SCHEME_PIPELINES = {
+    "AM" : pipeline_am,
+    "FM" : pipeline_fm,
+    "ASK": pipeline_ask,
+    "FSK": pipeline_fsk,
+    "PSK": pipeline_psk,
+}
 
-# =============================================================================
-# OUTPUT BUILDERS — one function per scheme
-# Each builds a dict of columns for that scheme's output CSV.
-# =============================================================================
 
-def _build_am(df, sig_cols, ts, labels):
-    """Build column dict for {STATION}_AM_demod.csv."""
-    out = {"timestamp": ts, "current_state_binary": labels}
-    metrics = []
-    for col in sig_cols:
+def _build_demod_dict(df, cols, index_col, scheme):
+    """Run every column through one demodulation pipeline and return output dict."""
+    label = df["current_state_binary"].fillna(0).astype(int) if "current_state_binary" in df.columns \
+            else pd.Series(np.zeros(len(df), dtype=int))
+    out = {index_col: df[index_col], "current_state_binary": label}
+
+    for col in cols:
         x = df[col].fillna(0).to_numpy(dtype=float)
-        if len(x) < 30:
-            continue
-        _, _, dem, snr = pipeline_am(x)
-        out[f"{col}_baseband"]        = np.round(normalise(x), 6)
-        out[f"{col}_am_demodulated"]  = np.round(dem, 6)
-        metrics.append((col, "AM", snr, None))
-        print(f"    AM  · {col:30s}  SNR = {snr:6.2f} dB")
-    return out, metrics
-
-
-def _build_fm(df, sig_cols, ts, labels):
-    """Build column dict for {STATION}_FM_demod.csv."""
-    out = {"timestamp": ts, "current_state_binary": labels}
-    metrics = []
-    for col in sig_cols:
-        x = df[col].fillna(0).to_numpy(dtype=float)
-        if len(x) < 30:
-            continue
-        _, _, dem, snr = pipeline_fm(x)
-        out[f"{col}_baseband"]        = np.round(normalise(x), 6)
-        out[f"{col}_fm_demodulated"]  = np.round(dem, 6)
-        metrics.append((col, "FM", snr, None))
-        print(f"    FM  · {col:30s}  SNR = {snr:6.2f} dB")
-    return out, metrics
-
-
-def _build_ask(df, sig_cols, ts, labels):
-    """Build column dict for {STATION}_ASK_demod.csv."""
-    out = {"timestamp": ts, "current_state_binary": labels}
-    metrics = []
-    for col in sig_cols:
-        x = df[col].fillna(0).to_numpy(dtype=float)
-        if len(x) < 30:
+        if len(x) < 10:
             continue
         n = len(x)
-        _, _, rec, env, snr, ber_val, orig = pipeline_ask(x)
-        out[f"{col}_baseband"]        = np.round(normalise(x), 6)
-        out[f"{col}_original_bits"]   = _expand_bits(orig, n).astype(int)
-        out[f"{col}_ask_recovered"]   = _expand_bits(rec,  n).astype(int)
-        metrics.append((col, "ASK", snr, ber_val))
-        print(f"    ASK · {col:30s}  SNR = {snr:6.2f} dB  BER = {ber_val:.5f}")
-    return out, metrics
+        out[f"{col}_baseband"] = np.round(normalise(x), 6)
+
+        if scheme == "AM":
+            _, _, dem, snr = pipeline_am(x)
+            out[f"{col}_am_demodulated"] = np.round(dem, 6)
+            print(f"    AM  · {col:40s} SNR={snr:6.2f} dB")
+
+        elif scheme == "FM":
+            _, _, dem, snr = pipeline_fm(x)
+            out[f"{col}_fm_demodulated"] = np.round(dem, 6)
+            print(f"    FM  · {col:40s} SNR={snr:6.2f} dB")
+
+        elif scheme == "ASK":
+            _, _, rec, _, snr, ber_val, orig = pipeline_ask(x)
+            out[f"{col}_original_bits"]  = _expand_bits(orig, n).astype(int)
+            out[f"{col}_ask_recovered"]  = _expand_bits(rec,  n).astype(int)
+            print(f"    ASK · {col:40s} SNR={snr:6.2f} dB  BER={ber_val:.5f}")
+
+        elif scheme == "FSK":
+            _, _, rec, snr, ber_val, orig = pipeline_fsk(x)
+            out[f"{col}_original_bits"]  = _expand_bits(orig, n).astype(int)
+            out[f"{col}_fsk_recovered"]  = _expand_bits(rec,  n).astype(int)
+            print(f"    FSK · {col:40s} SNR={snr:6.2f} dB  BER={ber_val:.5f}")
+
+        elif scheme == "PSK":
+            _, _, rec, snr, ber_val, orig = pipeline_psk(x)
+            out[f"{col}_original_bits"]  = _expand_bits(orig, n).astype(int)
+            out[f"{col}_psk_recovered"]  = _expand_bits(rec,  n).astype(int)
+            print(f"    PSK · {col:40s} SNR={snr:6.2f} dB  BER={ber_val:.5f}")
+
+    return out
 
 
-def _build_fsk(df, sig_cols, ts, labels):
-    """Build column dict for {STATION}_FSK_demod.csv."""
-    out = {"timestamp": ts, "current_state_binary": labels}
-    metrics = []
-    for col in sig_cols:
-        x = df[col].fillna(0).to_numpy(dtype=float)
-        if len(x) < 30:
-            continue
-        n = len(x)
-        _, _, rec, snr, ber_val, orig = pipeline_fsk(x)
-        out[f"{col}_baseband"]        = np.round(normalise(x), 6)
-        out[f"{col}_original_bits"]   = _expand_bits(orig, n).astype(int)
-        out[f"{col}_fsk_recovered"]   = _expand_bits(rec,  n).astype(int)
-        metrics.append((col, "FSK", snr, ber_val))
-        print(f"    FSK · {col:30s}  SNR = {snr:6.2f} dB  BER = {ber_val:.5f}")
-    return out, metrics
-
-
-def _build_psk(df, sig_cols, ts, labels):
-    """Build column dict for {STATION}_PSK_demod.csv."""
-    out = {"timestamp": ts, "current_state_binary": labels}
-    metrics = []
-    for col in sig_cols:
-        x = df[col].fillna(0).to_numpy(dtype=float)
-        if len(x) < 30:
-            continue
-        n = len(x)
-        _, _, rec, snr, ber_val, orig = pipeline_psk(x)
-        out[f"{col}_baseband"]        = np.round(normalise(x), 6)
-        out[f"{col}_original_bits"]   = _expand_bits(orig, n).astype(int)
-        out[f"{col}_psk_recovered"]   = _expand_bits(rec,  n).astype(int)
-        metrics.append((col, "PSK", snr, ber_val))
-        print(f"    PSK · {col:30s}  SNR = {snr:6.2f} dB  BER = {ber_val:.5f}")
-    return out, metrics
-
-
-def _save(data_dict, path):
-    """Order columns (timestamp first, label last) and save CSV."""
+def _save(data_dict, index_col, path):
     df_out   = pd.DataFrame(data_dict)
     mid_cols = [c for c in df_out.columns
-                if c not in ("timestamp", "current_state_binary")]
-    df_out   = df_out[["timestamp"] + mid_cols + ["current_state_binary"]]
+                if c not in (index_col, "current_state_binary")]
+    df_out   = df_out[[index_col] + mid_cols + ["current_state_binary"]]
     df_out.to_csv(path, index=False)
     return df_out.shape
 
 
-# =============================================================================
-# MAIN
-# =============================================================================
-
 def generate_demodulation_outputs():
     print("=" * 70)
     print("TELE 523 · Student 3 — Demodulation Output Generator")
-    print("Producing 35 handoff CSV files for Student 4")
-    print("Each station × each scheme × each signal column — independently")
+    print("14 input files × 5 schemes = 70 demodulated handoff files")
     print("=" * 70)
+    total = 0
 
-    SCHEMES = [
-        ("AM",  _build_am,  "AM_demod"),
-        ("FM",  _build_fm,  "FM_demod"),
-        ("ASK", _build_ask, "ASK_demod"),
-        ("FSK", _build_fsk, "FSK_demod"),
-        ("PSK", _build_psk, "PSK_demod"),
-    ]
+    for station in STATIONS:
+        print(f"\n-- {station} " + "-"*50)
 
-    all_metrics = []
-    total_files = 0
+        # ── filtered source ────────────────────────────────────────────────────
+        fp = os.path.join(PROCESSED_PATH, f"{station}_filtered.csv")
+        if os.path.exists(fp):
+            df_filt   = pd.read_csv(fp, parse_dates=["timestamp"])
+            filt_cols = [c for c in SIGNAL_COLS_FILTERED.get(station, [])
+                         if c in df_filt.columns]
+            for scheme in ["AM","FM","ASK","FSK","PSK"]:
+                print(f"  [filtered][{scheme}]")
+                out  = _build_demod_dict(df_filt, filt_cols, "timestamp", scheme)
+                path = os.path.join(OUT_DIR, f"{station}_filtered_{scheme}_demod.csv")
+                rows, cols = _save(out, "timestamp", path)
+                print(f"  --> Saved {os.path.basename(path)}  ({rows} rows × {cols} cols)")
+                total += 1
 
-    for station in sorted(SIGNAL_COLS.keys()):
-        fpath = os.path.join(PROCESSED_PATH, f"{station}_filtered.csv")
-        if not os.path.exists(fpath):
-            print(f"\n[SKIP] {station} — {station}_filtered.csv not found")
-            continue
+        # ── features source ────────────────────────────────────────────────────
+        xp = os.path.join(PROCESSED_PATH, f"{station}_features.csv")
+        if os.path.exists(xp):
+            df_feat   = pd.read_csv(xp)
+            if "segment_idx" not in df_feat.columns:
+                df_feat["segment_idx"] = range(len(df_feat))
+            feat_cols = [c for c in SIGNAL_COLS_FEATURES.get(station, [])
+                         if c in df_feat.columns]
+            for scheme in ["AM","FM","ASK","FSK","PSK"]:
+                print(f"  [features][{scheme}]")
+                out  = _build_demod_dict(df_feat, feat_cols, "segment_idx", scheme)
+                path = os.path.join(OUT_DIR, f"{station}_features_{scheme}_demod.csv")
+                rows, cols = _save(out, "segment_idx", path)
+                print(f"  --> Saved {os.path.basename(path)}  ({rows} rows × {cols} cols)")
+                total += 1
 
-        df       = pd.read_csv(fpath, parse_dates=["timestamp"])
-        sig_cols = [c for c in SIGNAL_COLS[station] if c in df.columns]
-        labels   = (df["current_state_binary"].fillna(0).astype(int)
-                    if "current_state_binary" in df.columns
-                    else pd.Series(np.zeros(len(df), dtype=int)))
-        ts = df["timestamp"]
-
-        print(f"\n-- {station} " + "-" * 50)
-
-        for scheme_name, builder_fn, suffix in SCHEMES:
-            print(f"  [{scheme_name}]")
-            data_dict, metrics = builder_fn(df, sig_cols, ts, labels)
-
-            out_path    = os.path.join(OUT_DIR, f"{station}_{suffix}.csv")
-            rows, cols  = _save(data_dict, out_path)
-            total_files += 1
-
-            print(f"  --> Saved {station}_{suffix}.csv  ({rows} rows × {cols} cols)")
-
-            for col, scheme, snr, ber_val in metrics:
-                all_metrics.append({
-                    "station"    : station,
-                    "signal_col" : col,
-                    "scheme"     : scheme,
-                    "SNR_dB"     : round(snr, 3),
-                    "BER"        : round(ber_val, 5) if ber_val is not None else None,
-                })
-
-    # ── Save metrics summary ───────────────────────────────────────────────────
-    metrics_df  = pd.DataFrame(all_metrics)
-    metrics_path = os.path.join(
-        os.path.dirname(OUT_DIR), "demodulation_metrics.csv"
-    )
-    metrics_df.to_csv(metrics_path, index=False)
-
-    # ── Print summary table ────────────────────────────────────────────────────
-    print("\n" + "=" * 70)
-    print(f"DONE — {total_files} demodulation output files written to:")
+    print(f"\n{'='*70}")
+    print(f"DONE — {total} demodulation output files written to:")
     print(f"  {OUT_DIR}")
-    print(f"\nMetrics CSV saved → {metrics_path}")
-    print("\nSNR summary (mean per station × scheme):")
-    pivot_snr = metrics_df.pivot_table(
-        values="SNR_dB", index="station", columns="scheme", aggfunc="mean"
-    ).round(2)
-    print(pivot_snr.to_string())
-
-    print("\nBER summary (digital schemes, mean per station):")
-    pivot_ber = metrics_df[metrics_df["BER"].notna()].pivot_table(
-        values="BER", index="station", columns="scheme", aggfunc="mean"
-    ).round(5)
-    print(pivot_ber.to_string())
-
-    print("\n✔  Student 4 handoff complete.")
-    print("   AM/FM files  → apply uniform quantization (PCM)")
-    print("   ASK/FSK/PSK  → apply NRZ / Manchester line coding")
+    print(f"\nStudent 4 handoff:")
+    print("  *_filtered_AM_demod.csv  / *_features_AM_demod.csv   -> quantize AM analog [0,1]")
+    print("  *_filtered_FM_demod.csv  / *_features_FM_demod.csv   -> quantize FM analog [0,1]")
+    print("  *_filtered_ASK_demod.csv / *_features_ASK_demod.csv  -> NRZ/Manchester line coding")
+    print("  *_filtered_FSK_demod.csv / *_features_FSK_demod.csv  -> NRZ/Manchester line coding")
+    print("  *_filtered_PSK_demod.csv / *_features_PSK_demod.csv  -> NRZ/Manchester line coding")
 
 
 if __name__ == "__main__":
