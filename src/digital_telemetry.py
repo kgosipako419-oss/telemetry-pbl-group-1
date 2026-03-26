@@ -8,7 +8,7 @@ import os
 # ===============================
 BIT_DEPTH = 8
 
-DATA_DIR = "data/raw/student3_output"
+DATA_DIR = "data/raw"
 OUTPUT_DIR = "results"
 LOG_DIR = "logs"
 JSON_DIR = "dashboard"
