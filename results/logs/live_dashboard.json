@@ -1,8 +1,8 @@
 {
     "timestamp": "2023-02-06 14:11:28",
     "station": "EC",
-    "modulation": "AM",
-    "file": "EC_1_filtered_AM_demod.csv",
+    "modulation": "PSK",
+    "file": "EC_1_filtered_PSK_demod.csv",
     "features": {
         "mean": 0.16321718000000002,
         "variance": 0.0069491862202876,
