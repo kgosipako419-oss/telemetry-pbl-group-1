@@ -1,225 +1,163 @@
-import pandas as pd
-import numpy as np
-import json
 import os
-from scipy.stats import kurtosis
-from scipy.fft import fft
+import json
+import time
+import numpy as np
+import pandas as pd
+from collections import deque
 
-# ===============================
+# =========================
 # CONFIG
-# ===============================
+# =========================
+DATA_DIR = "data/raw"
+WINDOW_SIZE = 100
 BIT_DEPTH = 8
+OUTPUT_JSON = "live_dashboard.json"
 
-BASE_DATA_DIR = "data/raw"
-OUTPUT_DIR = "results"
-LOG_DIR = "logs"
-JSON_DIR = "dashboard"
+# =========================
+# 1. LOAD ALL FILTERED FILES
+# =========================
+def load_filtered_files(folder):
+    files = []
+    for file in os.listdir(folder):
+        if "filtered" in file and file.endswith(".csv"):
+            files.append(os.path.join(folder, file))
+    return files
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
-os.makedirs(JSON_DIR, exist_ok=True)
-
-
-# ===============================
-# 1. LOAD CSV
-# ===============================
-def load_signal(csv_file):
-    df = pd.read_csv(csv_file)
-    df = df.select_dtypes(include=[np.number])
-
-    if df.empty:
-        raise ValueError(f"No numeric data in {csv_file}")
-
-    return df
-
-
-# ===============================
+# =========================
 # 2. ADAPTIVE QUANTIZATION
-# ===============================
-def adaptive_quantization(signal, csv_file, bits=8):
+# =========================
+def adaptive_quantization(signal, bits=8):
+    xmax = np.max(np.abs(signal)) + 1e-6
     L = 2 ** bits
-    quantized_df = pd.DataFrame()
+    delta = (2 * xmax) / L
 
-    for col in signal.columns:
-        x = signal[col].values
-        xmax = np.max(np.abs(x)) * 1.05
-        delta = (2 * xmax) / L
+    quantized = np.floor((signal + xmax) / delta + 0.5) * delta - xmax
+    return quantized, delta
 
-        q = np.round((x + xmax) / delta)
-        q = np.clip(q, 0, L - 1)
-
-        quantized_df[col] = q.astype(int)
-
-    filename = os.path.basename(csv_file).replace(".csv", "")
-    quantized_df.to_csv(f"{OUTPUT_DIR}/{filename}_quantized.csv", index=False)
-
-    return quantized_df
-
-
-# ===============================
+# =========================
 # 3. PCM ENCODING
-# ===============================
-def pcm_encode(quantized_df, csv_file, bits=8):
-    bitstream = ""
+# =========================
+def pcm_encode(signal, delta, bits=8):
+    xmax = np.max(np.abs(signal)) + 1e-6
+    indices = np.floor((signal + xmax) / delta).astype(int)
+    indices = np.clip(indices, 0, 2**bits - 1)
 
-    for _, row in quantized_df.iterrows():
-        for val in row:
-            bitstream += format(int(val), f'0{bits}b')
+    bitstream = []
+    for val in indices:
+        binary = format(val, f'0{bits}b')
+        bitstream.extend([int(b) for b in binary])
 
-    filename = os.path.basename(csv_file).replace(".csv", "")
-    with open(f"{OUTPUT_DIR}/{filename}_bitstream.txt", "w") as f:
-        f.write(bitstream)
+    return np.array(bitstream)
 
-    return bitstream
-
-
-# ===============================
+# =========================
 # 4. MANCHESTER ENCODING
-# ===============================
+# =========================
 def manchester_encode(bitstream):
-    encoded = ""
-
+    encoded = []
     for bit in bitstream:
-        if bit == "1":
-            encoded += "01"
+        if bit == 0:
+            encoded.extend([1, 0])
         else:
-            encoded += "10"
+            encoded.extend([0, 1])
+    return np.array(encoded)
 
-    return encoded
-
-
-# ===============================
+# =========================
 # 5. BER CALCULATION
-# ===============================
-def calculate_ber(original, received, csv_file):
-    errors = sum(o != r for o, r in zip(original, received))
-    ber = errors / len(original) if len(original) > 0 else 0
+# =========================
+def compute_ber(original_bits, recovered_bits):
+    length = min(len(original_bits), len(recovered_bits))
+    errors = np.sum(original_bits[:length] != recovered_bits[:length])
+    return errors / length if length > 0 else 0
 
-    filename = os.path.basename(csv_file).replace(".csv", "")
-    with open(f"{LOG_DIR}/{filename}_integrity.txt", "w") as f:
-        f.write(f"Total Bits: {len(original)}\n")
-        f.write(f"Errors: {errors}\n")
-        f.write(f"BER: {ber}\n")
+# =========================
+# 6. FEATURE EXTRACTION
+# =========================
+def extract_features(window):
+    data = np.array(window)
 
-    return ber
+    return {
+        "mean": float(np.mean(data)),
+        "variance": float(np.var(data)),
+        "rms": float(np.sqrt(np.mean(data**2))),
+        "max": float(np.max(data)),
+        "min": float(np.min(data))
+    }
 
+# =========================
+# 7. MAIN PROCESSING PIPELINE
+# =========================
+def process_file(file_path):
 
-# ===============================
-# 6. FEATURE EXTRACTION (UPGRADED)
-# ===============================
-def extract_features(signal, fs=100):
-    features = {}
+    df = pd.read_csv(file_path)
 
-    for col in signal.columns:
-        x = signal[col].values
-        N = len(x)
+    buffer = deque(maxlen=WINDOW_SIZE)
 
-        # ---- Time domain ----
-        mean_val = np.mean(x)
-        rms_val = np.sqrt(np.mean(x**2))
-        variance_val = np.var(x)
-        max_val = np.max(x)
-        min_val = np.min(x)
+    for _, row in df.iterrows():
 
-        crest_factor = max(abs(x)) / rms_val if rms_val != 0 else 0
-        kurt_val = kurtosis(x)
+        signal = row['i3_photoresistor_baseband']
+        timestamp = row['timestamp']
 
-        # ---- Frequency domain ----
-        X = np.abs(fft(x))
-        freqs = np.fft.fftfreq(N, d=1/fs)
+        buffer.append(signal)
 
-        mask = freqs > 0
-        freqs = freqs[mask]
-        X = X[mask]
+        if len(buffer) < WINDOW_SIZE:
+            continue
 
-        dominant_freq = freqs[np.argmax(X)] if len(freqs) > 0 else 0
-        spectral_energy = np.sum(X**2)
+        window = np.array(buffer)
 
-        features[col] = {
-            "mean": float(mean_val),
-            "rms": float(rms_val),
-            "variance": float(variance_val),
-            "max": float(max_val),
-            "min": float(min_val),
-            "crest_factor": float(crest_factor),
-            "kurtosis": float(kurt_val),
-            "dominant_frequency": float(dominant_freq),
-            "spectral_energy": float(spectral_energy)
+        # --- QUANTIZATION ---
+        quantized, delta = adaptive_quantization(window, BIT_DEPTH)
+
+        # --- PCM ---
+        bitstream = pcm_encode(quantized, delta, BIT_DEPTH)
+
+        # --- LINE CODING ---
+        encoded_stream = manchester_encode(bitstream)
+
+        # --- BER ---
+        if 'i3_photoresistor_original_bits' in row and 'i3_photoresistor_ask_recovered' in row:
+            original_bits = np.array([int(row['i3_photoresistor_original_bits'])])
+            recovered_bits = np.array([int(row['i3_photoresistor_ask_recovered'])])
+            ber = compute_ber(original_bits, recovered_bits)
+        else:
+            ber = 0
+
+        # --- FEATURES ---
+        features = extract_features(window)
+
+        # --- OUTPUT JSON ---
+        output = {
+            "timestamp": timestamp,
+            "file": os.path.basename(file_path),
+            "features": features,
+            "ber": float(ber),
+            "state": int(row.get("current_state_binary", 0))
         }
 
-    return features
+        yield output
 
 
-# ===============================
-# 7. JSON OUTPUT
-# ===============================
-def save_json(features, csv_file):
-    filename = os.path.basename(csv_file).replace(".csv", "")
-    with open(f"{JSON_DIR}/{filename}_features.json", "w") as f:
-        json.dump(features, f, indent=4)
+# =========================
+# 8. RUN SYSTEM (LIVE SIMULATION)
+# =========================
+def run_system():
 
+    files = load_filtered_files(DATA_DIR)
 
-# ===============================
-# HELPER: GET ALL CSV FILES
-# ===============================
-def get_all_csv_files(base_dir):
-    csv_files = []
-
-    for root, dirs, files in os.walk(base_dir):
+    while True:
         for file in files:
-            if file.endswith(".csv"):
-                csv_files.append(os.path.join(root, file))
+            for data in process_file(file):
 
-    return csv_files
+                # Save to JSON (overwrite for live dashboard)
+                with open(OUTPUT_JSON, "w") as f:
+                    json.dump(data, f, indent=4)
 
+                print(data)
 
-# ===============================
-# MAIN PIPELINE
-# ===============================
-def run_pipeline(csv_file):
-    print(f"\nProcessing: {csv_file}")
-
-    try:
-        signal = load_signal(csv_file)
-
-        quantized = adaptive_quantization(signal, csv_file, BIT_DEPTH)
-
-        bitstream = pcm_encode(quantized, csv_file, BIT_DEPTH)
-
-        encoded = manchester_encode(bitstream)
-
-        # Perfect channel (no noise yet)
-        received = bitstream
-
-        ber = calculate_ber(bitstream, received, csv_file)
-
-        features = extract_features(signal)
-
-        save_json(features, csv_file)
-
-        print(f"Done: {os.path.basename(csv_file)} | BER = {ber}")
-
-    except Exception as e:
-        print(f"Error processing {csv_file}: {e}")
+                time.sleep(0.05)  # simulate live feed
 
 
-# ===============================
-# RUN EVERYTHING
-# ===============================
+# =========================
+# ENTRY POINT
+# =========================
 if __name__ == "__main__":
-    if not os.path.exists(BASE_DATA_DIR):
-        print(f"ERROR: Folder not found → {BASE_DATA_DIR}")
-        exit()
-
-    files = get_all_csv_files(BASE_DATA_DIR)
-
-    if not files:
-        print("No CSV files found in data/raw/")
-        exit()
-
-    print(f"Found {len(files)} CSV files.\n")
-
-    for f in files:
-        run_pipeline(f)
-
-    print("\nALL FILES PROCESSED SUCCESSFULLY.")
+    run_system()
