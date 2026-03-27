@@ -21,7 +21,7 @@ def load_filtered_files(folder):
     for file in os.listdir(folder):
         if "filtered" in file and file.endswith(".csv"):
             files.append(os.path.join(folder, file))
-    return files
+    return sorted(files)
 
 # =========================
 # 2. ADAPTIVE QUANTIZATION
@@ -66,8 +66,10 @@ def manchester_encode(bitstream):
 # =========================
 def compute_ber(original_bits, recovered_bits):
     length = min(len(original_bits), len(recovered_bits))
+    if length == 0:
+        return 0
     errors = np.sum(original_bits[:length] != recovered_bits[:length])
-    return errors / length if length > 0 else 0
+    return errors / length
 
 # =========================
 # 6. FEATURE EXTRACTION
@@ -84,13 +86,18 @@ def extract_features(window):
     }
 
 # =========================
-# 7. MAIN PROCESSING PIPELINE
+# 7. PROCESS SINGLE FILE (GENERATOR)
 # =========================
 def process_file(file_path):
 
     df = pd.read_csv(file_path)
-
     buffer = deque(maxlen=WINDOW_SIZE)
+
+    # Extract metadata
+    filename = os.path.basename(file_path)
+    parts = filename.split("_")
+    station = parts[0]
+    modulation = parts[3]  # AM, ASK, FM, etc.
 
     for _, row in df.iterrows():
 
@@ -114,20 +121,22 @@ def process_file(file_path):
         encoded_stream = manchester_encode(bitstream)
 
         # --- BER ---
-        if 'i3_photoresistor_original_bits' in row and 'i3_photoresistor_ask_recovered' in row:
-            original_bits = np.array([int(row['i3_photoresistor_original_bits'])])
-            recovered_bits = np.array([int(row['i3_photoresistor_ask_recovered'])])
-            ber = compute_ber(original_bits, recovered_bits)
-        else:
+        try:
+            original_bits = int(row.get('i3_photoresistor_original_bits', 0))
+            recovered_bits = int(row.get('i3_photoresistor_ask_recovered', 0))
+            ber = compute_ber(np.array([original_bits]), np.array([recovered_bits]))
+        except:
             ber = 0
 
         # --- FEATURES ---
         features = extract_features(window)
 
-        # --- OUTPUT JSON ---
+        # --- OUTPUT ---
         output = {
-            "timestamp": timestamp,
-            "file": os.path.basename(file_path),
+            "timestamp": str(timestamp),
+            "station": station,
+            "modulation": modulation,
+            "file": filename,
             "features": features,
             "ber": float(ber),
             "state": int(row.get("current_state_binary", 0))
@@ -137,23 +146,36 @@ def process_file(file_path):
 
 
 # =========================
-# 8. RUN SYSTEM (LIVE SIMULATION)
+# 8. FIXED RUN SYSTEM (MULTI-FILE STREAMING)
 # =========================
 def run_system():
 
     files = load_filtered_files(DATA_DIR)
 
-    while True:
-        for file in files:
-            for data in process_file(file):
+    print("FILES LOADED:")
+    for f in files:
+        print(f)
 
-                # Save to JSON (overwrite for live dashboard)
+    # Create generator for each file
+    generators = [process_file(file) for file in files]
+
+    os.makedirs("results/logs", exist_ok=True)
+
+    while True:
+        for gen, file in zip(generators, files):
+            try:
+                data = next(gen)
+
+                # Write latest data (live overwrite)
                 with open(OUTPUT_JSON, "w") as f:
                     json.dump(data, f, indent=4)
 
-                print(data)
+                print(f"[{os.path.basename(file)}] → {data}")
 
-                time.sleep(0.05)  # simulate live feed
+            except StopIteration:
+                continue  # file finished
+
+        time.sleep(0.05)
 
 
 # =========================
