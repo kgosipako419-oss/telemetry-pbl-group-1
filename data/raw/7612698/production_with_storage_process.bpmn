@@ -1,0 +1,220 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:camunda="http://camunda.org/schema/1.0/bpmn" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" id="Definitions_017gbh2" targetNamespace="http://bpmn.io/schema/bpmn" exporter="Camunda Modeler" exporterVersion="4.2.0">
+  <bpmn:process id="production_storage_process2" isExecutable="true">
+    <bpmn:startEvent id="Event_127z07e" name="Start Production">
+      <bpmn:outgoing>Flow_06tular</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:endEvent id="Event_06fuvj7" name="Production ended">
+      <bpmn:incoming>Flow_09kyev4</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:serviceTask id="Activity_1e6xoye" name="OV Burn" camunda:asyncBefore="true" camunda:asyncAfter="true" camunda:exclusive="false">
+      <bpmn:extensionElements>
+        <camunda:connector>
+          <camunda:inputOutput>
+            <camunda:inputParameter name="url">
+              <camunda:script scriptFormat="javascript">url = "http://127.0.0.1:5000/ov/burn?machine=ov_1&amp;time=2"</camunda:script>
+            </camunda:inputParameter>
+            <camunda:inputParameter name="method">GET</camunda:inputParameter>
+          </camunda:inputOutput>
+          <camunda:connectorId>http-connector</camunda:connectorId>
+        </camunda:connector>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_0v40nih</bpmn:incoming>
+      <bpmn:outgoing>Flow_0u2dfsx</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="Activity_107pam0" name="Pickup and transport to Oven" camunda:asyncBefore="true" camunda:asyncAfter="true" camunda:exclusive="false">
+      <bpmn:extensionElements>
+        <camunda:connector>
+          <camunda:inputOutput>
+            <camunda:inputParameter name="url">
+              <camunda:script scriptFormat="javascript">url = "http://127.0.0.1:5000/vgr/pick_up_and_transport?machine=vgr_1&amp;start=color_detection_delivery_pick_up_station&amp;end=oven"</camunda:script>
+            </camunda:inputParameter>
+            <camunda:inputParameter name="method">GET</camunda:inputParameter>
+          </camunda:inputOutput>
+          <camunda:connectorId>http-connector</camunda:connectorId>
+        </camunda:connector>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_1wclpg0</bpmn:incoming>
+      <bpmn:outgoing>Flow_0v40nih</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:sequenceFlow id="Flow_0v40nih" sourceRef="Activity_107pam0" targetRef="Activity_1e6xoye" />
+    <bpmn:serviceTask id="Activity_1vvxp20" name="Get Workpiece from Pickup Station">
+      <bpmn:extensionElements>
+        <camunda:connector>
+          <camunda:inputOutput>
+            <camunda:inputParameter name="url">
+              <camunda:script scriptFormat="javascript">url = "http://127.0.0.1:5000/vgr/pick_up_and_transport?machine=vgr_1&amp;start=delivery_pick_up_station&amp;end=color_detection_delivery_pick_up_station"</camunda:script>
+            </camunda:inputParameter>
+            <camunda:inputParameter name="method">GET</camunda:inputParameter>
+          </camunda:inputOutput>
+          <camunda:connectorId>http-connector</camunda:connectorId>
+        </camunda:connector>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_06tular</bpmn:incoming>
+      <bpmn:outgoing>Flow_1odrk7g</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="Activity_0d7zwb0" name="Read Color">
+      <bpmn:extensionElements>
+        <camunda:connector>
+          <camunda:inputOutput>
+            <camunda:inputParameter name="url">
+              <camunda:script scriptFormat="javascript">url = "http://127.0.0.1:5000/vgr/read_color?machine=vgr_1"</camunda:script>
+            </camunda:inputParameter>
+            <camunda:inputParameter name="method">GET</camunda:inputParameter>
+            <camunda:outputParameter name="color">${JSON(response).jsonPath("$.attributes[0].current_color").stringValue()}</camunda:outputParameter>
+          </camunda:inputOutput>
+          <camunda:connectorId>http-connector</camunda:connectorId>
+        </camunda:connector>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_1odrk7g</bpmn:incoming>
+      <bpmn:outgoing>Flow_1wclpg0</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:sequenceFlow id="Flow_1odrk7g" sourceRef="Activity_1vvxp20" targetRef="Activity_0d7zwb0" />
+    <bpmn:sequenceFlow id="Flow_06tular" sourceRef="Event_127z07e" targetRef="Activity_1vvxp20" />
+    <bpmn:sequenceFlow id="Flow_1wclpg0" sourceRef="Activity_0d7zwb0" targetRef="Activity_107pam0" />
+    <bpmn:serviceTask id="Activity_0mjknki" name="Pickup from oven">
+      <bpmn:extensionElements>
+        <camunda:connector>
+          <camunda:inputOutput>
+            <camunda:inputParameter name="url">
+              <camunda:script scriptFormat="javascript">url = "http://127.0.0.1:5000/vgr/pick_up_and_transport?machine=vgr_1&amp;start=oven&amp;end=color_detection_delivery_pick_up_station"</camunda:script>
+            </camunda:inputParameter>
+            <camunda:inputParameter name="method">GET</camunda:inputParameter>
+          </camunda:inputOutput>
+          <camunda:connectorId>http-connector</camunda:connectorId>
+        </camunda:connector>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_0u2dfsx</bpmn:incoming>
+      <bpmn:outgoing>Flow_0nbmaaz</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:sequenceFlow id="Flow_0u2dfsx" sourceRef="Activity_1e6xoye" targetRef="Activity_0mjknki" />
+    <bpmn:serviceTask id="Activity_0o7alnt" name="Move to DPS">
+      <bpmn:extensionElements>
+        <camunda:connector>
+          <camunda:inputOutput>
+            <camunda:inputParameter name="url">
+              <camunda:script scriptFormat="javascript">url = "http://127.0.0.1:5000/vgr/pick_up_and_transport?machine=vgr_1&amp;start=color_detection_delivery_pick_up_station&amp;end=high_bay_warehouse_holding_position"</camunda:script>
+            </camunda:inputParameter>
+            <camunda:inputParameter name="method">GET</camunda:inputParameter>
+          </camunda:inputOutput>
+          <camunda:connectorId>http-connector</camunda:connectorId>
+        </camunda:connector>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_0nbmaaz</bpmn:incoming>
+      <bpmn:outgoing>Flow_19w0jj9</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="Activity_140h2m4" name="Store Workpiece in HBW">
+      <bpmn:extensionElements>
+        <camunda:connector>
+          <camunda:inputOutput>
+            <camunda:inputParameter name="url">
+              <camunda:script scriptFormat="javascript">url = "http://127.0.0.1:5000/process/store_in_hbw_container?color=" + execution.getVariable("color")</camunda:script>
+            </camunda:inputParameter>
+            <camunda:inputParameter name="method">GET</camunda:inputParameter>
+          </camunda:inputOutput>
+          <camunda:connectorId>http-connector</camunda:connectorId>
+        </camunda:connector>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_19w0jj9</bpmn:incoming>
+      <bpmn:outgoing>Flow_1mk1gy2</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="Activity_1k9dccn" name="Calibrate VGR">
+      <bpmn:extensionElements>
+        <camunda:connector>
+          <camunda:inputOutput>
+            <camunda:inputParameter name="url">
+              <camunda:script scriptFormat="javascript">url = "http://127.0.0.1:5000/vgr/calibrate?machine=vgr_1"</camunda:script>
+            </camunda:inputParameter>
+            <camunda:inputParameter name="method">GET</camunda:inputParameter>
+          </camunda:inputOutput>
+          <camunda:connectorId>http-connector</camunda:connectorId>
+        </camunda:connector>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_1mk1gy2</bpmn:incoming>
+      <bpmn:outgoing>Flow_09kyev4</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:sequenceFlow id="Flow_19w0jj9" sourceRef="Activity_0o7alnt" targetRef="Activity_140h2m4" />
+    <bpmn:sequenceFlow id="Flow_1mk1gy2" sourceRef="Activity_140h2m4" targetRef="Activity_1k9dccn" />
+    <bpmn:sequenceFlow id="Flow_0nbmaaz" sourceRef="Activity_0mjknki" targetRef="Activity_0o7alnt" />
+    <bpmn:sequenceFlow id="Flow_09kyev4" sourceRef="Activity_1k9dccn" targetRef="Event_06fuvj7" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+    <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="production_storage_process2">
+      <bpmndi:BPMNEdge id="Flow_09kyev4_di" bpmnElement="Flow_09kyev4">
+        <di:waypoint x="1060" y="290" />
+        <di:waypoint x="1142" y="290" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_0nbmaaz_di" bpmnElement="Flow_0nbmaaz">
+        <di:waypoint x="600" y="290" />
+        <di:waypoint x="640" y="290" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_1mk1gy2_di" bpmnElement="Flow_1mk1gy2">
+        <di:waypoint x="900" y="290" />
+        <di:waypoint x="960" y="290" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_19w0jj9_di" bpmnElement="Flow_19w0jj9">
+        <di:waypoint x="740" y="290" />
+        <di:waypoint x="800" y="290" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_0u2dfsx_di" bpmnElement="Flow_0u2dfsx">
+        <di:waypoint x="400" y="290" />
+        <di:waypoint x="500" y="290" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_1wclpg0_di" bpmnElement="Flow_1wclpg0">
+        <di:waypoint x="620" y="120" />
+        <di:waypoint x="820" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_06tular_di" bpmnElement="Flow_06tular">
+        <di:waypoint x="215" y="120" />
+        <di:waypoint x="340" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_1odrk7g_di" bpmnElement="Flow_1odrk7g">
+        <di:waypoint x="440" y="120" />
+        <di:waypoint x="520" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_0v40nih_di" bpmnElement="Flow_0v40nih">
+        <di:waypoint x="870" y="160" />
+        <di:waypoint x="870" y="205" />
+        <di:waypoint x="197" y="205" />
+        <di:waypoint x="197" y="290" />
+        <di:waypoint x="300" y="290" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNShape id="Event_127z07e_di" bpmnElement="Event_127z07e">
+        <dc:Bounds x="179" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="158" y="145" width="79" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_06fuvj7_di" bpmnElement="Event_06fuvj7">
+        <dc:Bounds x="1142" y="272" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1117" y="315" width="87" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Activity_1e6xoye_di" bpmnElement="Activity_1e6xoye">
+        <dc:Bounds x="300" y="250" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Activity_107pam0_di" bpmnElement="Activity_107pam0">
+        <dc:Bounds x="820" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Activity_1vvxp20_di" bpmnElement="Activity_1vvxp20">
+        <dc:Bounds x="340" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Activity_0d7zwb0_di" bpmnElement="Activity_0d7zwb0">
+        <dc:Bounds x="520" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Activity_0mjknki_di" bpmnElement="Activity_0mjknki">
+        <dc:Bounds x="500" y="250" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Activity_0o7alnt_di" bpmnElement="Activity_0o7alnt">
+        <dc:Bounds x="640" y="250" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Activity_140h2m4_di" bpmnElement="Activity_140h2m4">
+        <dc:Bounds x="800" y="250" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Activity_1k9dccn_di" bpmnElement="Activity_1k9dccn">
+        <dc:Bounds x="960" y="250" width="100" height="80" />
+      </bpmndi:BPMNShape>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>
