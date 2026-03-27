@@ -30,7 +30,6 @@ def adaptive_quantization(signal, bits=8):
     xmax = np.max(np.abs(signal)) + 1e-6
     L = 2 ** bits
     delta = (2 * xmax) / L
-
     quantized = np.floor((signal + xmax) / delta + 0.5) * delta - xmax
     return quantized, delta
 
@@ -76,7 +75,6 @@ def compute_ber(original_bits, recovered_bits):
 # =========================
 def extract_features(window):
     data = np.array(window)
-
     return {
         "mean": float(np.mean(data)),
         "variance": float(np.var(data)),
@@ -86,23 +84,43 @@ def extract_features(window):
     }
 
 # =========================
-# 7. PROCESS SINGLE FILE (GENERATOR)
+# 7. PROCESS FILE (SMART + ROBUST)
 # =========================
 def process_file(file_path):
 
     df = pd.read_csv(file_path)
     buffer = deque(maxlen=WINDOW_SIZE)
 
-    # Extract metadata
     filename = os.path.basename(file_path)
     parts = filename.split("_")
     station = parts[0]
-    modulation = parts[3]  # AM, ASK, FM, etc.
+    modulation = parts[3]
 
+    # 🔍 AUTO-DETECT COLUMNS
+    baseband_col = None
+    original_col = None
+    recovered_col = None
+
+    for col in df.columns:
+        if "baseband" in col:
+            baseband_col = col
+        if "original_bits" in col:
+            original_col = col
+        if "recovered" in col:
+            recovered_col = col
+
+    if baseband_col is None:
+        raise ValueError(f"No baseband column found in {file_path}")
+
+    print(f"{filename} -> using baseband column: {baseband_col}")
+
+    # =========================
+    # STREAM DATA
+    # =========================
     for _, row in df.iterrows():
 
-        signal = row['i3_photoresistor_baseband']
-        timestamp = row['timestamp']
+        signal = row[baseband_col]
+        timestamp = row.get('timestamp', 'unknown')
 
         buffer.append(signal)
 
@@ -122,8 +140,8 @@ def process_file(file_path):
 
         # --- BER ---
         try:
-            original_bits = int(row.get('i3_photoresistor_original_bits', 0))
-            recovered_bits = int(row.get('i3_photoresistor_ask_recovered', 0))
+            original_bits = int(row[original_col]) if original_col else 0
+            recovered_bits = int(row[recovered_col]) if recovered_col else 0
             ber = compute_ber(np.array([original_bits]), np.array([recovered_bits]))
         except:
             ber = 0
@@ -146,7 +164,7 @@ def process_file(file_path):
 
 
 # =========================
-# 8. FIXED RUN SYSTEM (MULTI-FILE STREAMING)
+# 8. RUN SYSTEM (FIXED MULTI-STREAM)
 # =========================
 def run_system():
 
@@ -156,7 +174,6 @@ def run_system():
     for f in files:
         print(f)
 
-    # Create generator for each file
     generators = [process_file(file) for file in files]
 
     os.makedirs("results/logs", exist_ok=True)
@@ -166,14 +183,13 @@ def run_system():
             try:
                 data = next(gen)
 
-                # Write latest data (live overwrite)
                 with open(OUTPUT_JSON, "w") as f:
                     json.dump(data, f, indent=4)
 
                 print(f"[{os.path.basename(file)}] -> {data}")
 
             except StopIteration:
-                continue  # file finished
+                continue
 
         time.sleep(0.05)
 
