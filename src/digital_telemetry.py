@@ -11,7 +11,7 @@ from collections import deque
 DATA_DIR = "data/raw"
 WINDOW_SIZE = 100
 BIT_DEPTH = 8
-OUTPUT_JSON = "live_dashboard.json"
+OUTPUT_JSON = "results/logs/live_dashboard.json"
 
 # =========================
 # 1. LOAD ALL FILTERED FILES
