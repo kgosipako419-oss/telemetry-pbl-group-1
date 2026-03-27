@@ -170,7 +170,7 @@ def run_system():
                 with open(OUTPUT_JSON, "w") as f:
                     json.dump(data, f, indent=4)
 
-                print(f"[{os.path.basename(file)}] → {data}")
+                print(f"[{os.path.basename(file)}] -> {data}")
 
             except StopIteration:
                 continue  # file finished
