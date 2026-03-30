@@ -1,14 +1,14 @@
 {
-    "timestamp": "2023-02-06 14:11:28",
-    "station": "EC",
+    "timestamp": "2023-02-06 14:12:16",
+    "station": "VGR",
     "modulation": "PSK",
-    "file": "EC_1_filtered_PSK_demod.csv",
+    "file": "VGR_1_filtered_PSK_demod.csv",
     "features": {
-        "mean": 0.16321718000000002,
-        "variance": 0.0069491862202876,
-        "rms": 0.18327311332391338,
-        "max": 0.227478,
-        "min": 0.0
+        "mean": 0.17634645000000002,
+        "variance": 0.0046555815805475,
+        "rms": 0.18908636124308384,
+        "max": 0.292378,
+        "min": 0.106743
     },
     "ber": 0.0,
     "state": 1

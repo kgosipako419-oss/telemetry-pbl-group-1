@@ -1,201 +1,298 @@
-import os
-import json
-import time
-import numpy as np
+"""
+generate_telemetry_log.py
+TELE 523 · Group 1 — Digital Telemetry Lead
+───────────────────────────────────────────────────────────────
+Converts all {STATION}_AM_monitoring_ready.csv files into a
+single JSONL telemetry stream log the Monitoring Lead can
+tail / stream into their Streamlit dashboard.
+
+Log format (one JSON object per line):
+  {
+    "log_ts"               : "2023-02-06 14:08:08",
+    "recv_ts"              : "2026-03-31T09:00:00",
+    "station"              : "MM_1",
+    "mod_scheme"           : "AM",
+    "segment_idx"          : 0,
+    "segment_start"        : "2023-02-06T14:08:08",
+    "segment_end"          : "2023-02-06T14:09:06",
+    "machine_state"        : 1,
+    "dt_integrity_flag"    : 1,
+    "dt_parity_pass_rate"  : 0.972,
+    "dt_checksum_ok_rate"  : 1.0,
+    "dt_best_bit_depth"    : 16,
+    "dt_channel_ber_awgn"  : 0.000528,
+    "dt_channel_ber_fading": 0.501,
+    "features"             : { ... all signal features ... },
+    "reconstructed"        : { ... PCM-decoded segment stats ... },
+    "alerts"               : []
+  }
+"""
+
+import os, json
 import pandas as pd
-from collections import deque
+import numpy as np
+from datetime import datetime, timedelta
 
-# =========================
-# CONFIG
-# =========================
-DATA_DIR = "data/raw"
-WINDOW_SIZE = 100
-BIT_DEPTH = 8
-OUTPUT_JSON = "results/logs/live_dashboard.json"
+PROC_DIR         = "data/processed/digital_telemetry"
+OUT_DIR          = "results/logs"
+STATIONS         = ["EC_1", "HBW_1", "MM_1", "OV_1", "SM_1", "VGR_1", "WT_1"]
+MOD_SCHEME       = "AM"
+SIM_START        = datetime(2026, 3, 31, 9, 0, 0)
+SIM_INTERVAL_SEC = 30
 
-# =========================
-# 1. LOAD ALL FILTERED FILES
-# =========================
-def load_filtered_files(folder):
-    files = []
-    for file in os.listdir(folder):
-        if "filtered" in file and file.endswith(".csv"):
-            files.append(os.path.join(folder, file))
-    return sorted(files)
+THRESH_PARITY    = 0.95
+THRESH_CS        = 0.90
+THRESH_BER_AWGN  = 0.01
 
-# =========================
-# 2. ADAPTIVE QUANTIZATION
-# =========================
-def adaptive_quantization(signal, bits=8):
-    xmax = np.max(np.abs(signal)) + 1e-6
-    L = 2 ** bits
-    delta = (2 * xmax) / L
-    quantized = np.floor((signal + xmax) / delta + 0.5) * delta - xmax
-    return quantized, delta
 
-# =========================
-# 3. PCM ENCODING
-# =========================
-def pcm_encode(signal, delta, bits=8):
-    xmax = np.max(np.abs(signal)) + 1e-6
-    indices = np.floor((signal + xmax) / delta).astype(int)
-    indices = np.clip(indices, 0, 2**bits - 1)
-
-    bitstream = []
-    for val in indices:
-        binary = format(val, f'0{bits}b')
-        bitstream.extend([int(b) for b in binary])
-
-    return np.array(bitstream)
-
-# =========================
-# 4. MANCHESTER ENCODING
-# =========================
-def manchester_encode(bitstream):
-    encoded = []
-    for bit in bitstream:
-        if bit == 0:
-            encoded.extend([1, 0])
-        else:
-            encoded.extend([0, 1])
-    return np.array(encoded)
-
-# =========================
-# 5. BER CALCULATION
-# =========================
-def compute_ber(original_bits, recovered_bits):
-    length = min(len(original_bits), len(recovered_bits))
-    if length == 0:
-        return 0
-    errors = np.sum(original_bits[:length] != recovered_bits[:length])
-    return errors / length
-
-# =========================
-# 6. FEATURE EXTRACTION
-# =========================
-def extract_features(window):
-    data = np.array(window)
-    return {
-        "mean": float(np.mean(data)),
-        "variance": float(np.var(data)),
-        "rms": float(np.sqrt(np.mean(data**2))),
-        "max": float(np.max(data)),
-        "min": float(np.min(data))
+def _feature_cols(df):
+    skip = {
+        "segment_idx","segment_start","segment_end","current_state_binary",
+        "dt_parity_pass_rate","dt_checksum_ok_rate","dt_best_bit_depth",
+        "dt_mod_scheme","dt_channel_ber_awgn","dt_channel_ber_fading","dt_integrity_flag",
     }
+    recon = ("_reconstructed_mean", "_reconstructed_rms")
+    return [c for c in df.columns if c not in skip and not any(c.endswith(s) for s in recon)]
 
-# =========================
-# 7. PROCESS FILE (SMART + ROBUST)
-# =========================
-def process_file(file_path):
 
-    df = pd.read_csv(file_path)
-    buffer = deque(maxlen=WINDOW_SIZE)
+def _recon_cols(df):
+    return [c for c in df.columns
+            if c.endswith("_reconstructed_mean") or c.endswith("_reconstructed_rms")]
 
-    filename = os.path.basename(file_path)
-    parts = filename.split("_")
-    station = parts[0]
-    modulation = parts[3]
 
-    # 🔍 AUTO-DETECT COLUMNS
-    baseband_col = None
-    original_col = None
-    recovered_col = None
+def _alerts(row):
+    a = []
+    if row.get("dt_integrity_flag", 1) == 0:
+        a.append("INTEGRITY_WARN: telemetry integrity flag degraded")
+    if row.get("dt_parity_pass_rate", 1.0) < THRESH_PARITY:
+        a.append(f"PARITY_WARN: pass_rate={row['dt_parity_pass_rate']:.3f} < {THRESH_PARITY}")
+    if row.get("dt_checksum_ok_rate", 1.0) < THRESH_CS:
+        a.append(f"CHECKSUM_WARN: ok_rate={row['dt_checksum_ok_rate']:.3f} < {THRESH_CS}")
+    if row.get("dt_channel_ber_awgn", 0.0) > THRESH_BER_AWGN:
+        a.append(f"BER_WARN: ber_awgn={row['dt_channel_ber_awgn']:.6f} > {THRESH_BER_AWGN}")
+    if row.get("current_state_binary", 1) == 0:
+        a.append("MACHINE_FAULT: station not in ready state")
+    return a
 
-    for col in df.columns:
-        if "baseband" in col:
-            baseband_col = col
-        if "original_bits" in col:
-            original_col = col
-        if "recovered" in col:
-            recovered_col = col
 
-    if baseband_col is None:
-        raise ValueError(f"No baseband column found in {file_path}")
+def _safe(v):
+    if isinstance(v, float) and np.isnan(v):
+        return None
+    if isinstance(v, np.integer):
+        return int(v)
+    if isinstance(v, np.floating):
+        return round(float(v), 6)
+    return v
 
-    print(f"{filename} -> using baseband column: {baseband_col}")
 
-    # =========================
-    # STREAM DATA
-    # =========================
-    for _, row in df.iterrows():
+def generate_log():
+    os.makedirs(OUT_DIR, exist_ok=True)
 
-        signal = row[baseband_col]
-        timestamp = row.get('timestamp', 'unknown')
+    log_path    = os.path.join(OUT_DIR, "telemetry_stream.log")
+    readme_path = os.path.join(OUT_DIR, "telemetry_stream_README.txt")
 
-        buffer.append(signal)
+    all_frames = []
 
-        if len(buffer) < WINDOW_SIZE:
+    for station in STATIONS:
+        csv_path = os.path.join(PROC_DIR, f"{station}_{MOD_SCHEME}_monitoring_ready.csv")
+        if not os.path.exists(csv_path):
+            print(f"  [SKIP] {station}")
             continue
 
-        window = np.array(buffer)
+        df = pd.read_csv(csv_path)
+        feat_cols  = _feature_cols(df)
+        recon_cols = _recon_cols(df)
+        print(f"  {station}: {len(df)} segments | {len(feat_cols)} features | {len(recon_cols)} recon cols")
 
-        # --- QUANTIZATION ---
-        quantized, delta = adaptive_quantization(window, BIT_DEPTH)
+        for _, row in df.iterrows():
+            station_offset = STATIONS.index(station)
+            recv_ts = SIM_START + timedelta(
+                seconds=(int(row["segment_idx"]) * len(STATIONS) + station_offset) * SIM_INTERVAL_SEC
+            )
 
-        # --- PCM ---
-        bitstream = pcm_encode(quantized, delta, BIT_DEPTH)
+            features     = {c: _safe(row[c]) for c in feat_cols}
+            reconstructed = {c: _safe(row[c]) for c in recon_cols}
 
-        # --- LINE CODING ---
-        encoded_stream = manchester_encode(bitstream)
+            frame = {
+                "log_ts"               : str(row["segment_start"])[:19].replace("T", " "),
+                "recv_ts"              : recv_ts.strftime("%Y-%m-%dT%H:%M:%S"),
+                "station"              : station,
+                "mod_scheme"           : MOD_SCHEME,
+                "segment_idx"          : int(row["segment_idx"]),
+                "segment_start"        : str(row["segment_start"])[:19],
+                "segment_end"          : str(row["segment_end"])[:19],
+                "machine_state"        : int(row["current_state_binary"]),
+                "dt_integrity_flag"    : int(row["dt_integrity_flag"]),
+                "dt_parity_pass_rate"  : round(float(row["dt_parity_pass_rate"]), 4),
+                "dt_checksum_ok_rate"  : round(float(row["dt_checksum_ok_rate"]),  4),
+                "dt_best_bit_depth"    : int(row["dt_best_bit_depth"]),
+                "dt_channel_ber_awgn"  : round(float(row["dt_channel_ber_awgn"]),  6),
+                "dt_channel_ber_fading": round(float(row["dt_channel_ber_fading"]), 6),
+                "features"             : features,
+                "reconstructed"        : reconstructed,
+                "alerts"               : _alerts(row),
+            }
+            all_frames.append(frame)
 
-        # --- BER ---
-        try:
-            original_bits = int(row[original_col]) if original_col else 0
-            recovered_bits = int(row[recovered_col]) if recovered_col else 0
-            ber = compute_ber(np.array([original_bits]), np.array([recovered_bits]))
-        except:
-            ber = 0
+    all_frames.sort(key=lambda f: (f["recv_ts"], f["station"]))
 
-        # --- FEATURES ---
-        features = extract_features(window)
+    with open(log_path, "w") as fout:
+        for frame in all_frames:
+            fout.write(json.dumps(frame) + "\n")
 
-        # --- OUTPUT ---
-        output = {
-            "timestamp": str(timestamp),
-            "station": station,
-            "modulation": modulation,
-            "file": filename,
-            "features": features,
-            "ber": float(ber),
-            "state": int(row.get("current_state_binary", 0))
-        }
+    total_alerts = sum(len(f["alerts"]) for f in all_frames)
+    print(f"\n  Log written  → {log_path}")
+    print(f"  Frames       : {len(all_frames)}")
+    print(f"  Alerts fired : {total_alerts}")
+    print(f"  Time span    : {all_frames[0]['recv_ts']} → {all_frames[-1]['recv_ts']}")
 
-        yield output
-
-
-# =========================
-# 8. RUN SYSTEM (FIXED MULTI-STREAM)
-# =========================
-def run_system():
-
-    files = load_filtered_files(DATA_DIR)
-
-    print("FILES LOADED:")
-    for f in files:
-        print(f)
-
-    generators = [process_file(file) for file in files]
-
-    os.makedirs("results/logs", exist_ok=True)
-
-    while True:
-        for gen, file in zip(generators, files):
-            try:
-                data = next(gen)
-
-                with open(OUTPUT_JSON, "w") as f:
-                    json.dump(data, f, indent=4)
-
-                print(f"[{os.path.basename(file)}] -> {data}")
-
-            except StopIteration:
-                continue
-
-        time.sleep(0.05)
+    _write_readme(readme_path, len(all_frames),
+                  all_frames[0]["recv_ts"], all_frames[-1]["recv_ts"])
 
 
-# =========================
-# ENTRY POINT
-# =========================
+def _write_readme(path, n_frames, t_start, t_end):
+    txt = f"""TELEMETRY STREAM LOG — MONITORING LEAD GUIDE
+TELE 523 · Group 1 · Digital Telemetry Lead Output
+============================================================
+
+FILE
+  telemetry_stream.log
+
+FORMAT
+  JSONL (Newline-Delimited JSON) — one JSON object per line.
+  Each line = one telemetry frame = one 60-second segment from
+  one station, processed through the full digital telemetry chain:
+  quantization → PCM encoding → line coding → channel simulation → decode.
+
+  Total frames    : {n_frames}
+  Simulated span  : {t_start}  →  {t_end}
+  Frame interval  : 30 seconds between consecutive frames
+  Stations        : EC_1  HBW_1  MM_1  OV_1  SM_1  VGR_1  WT_1
+
+
+HOW TO READ THE LOG IN PYTHON
+──────────────────────────────────────────────────────────────
+
+  # Option A — load all at once (batch / replay mode)
+  import json
+  frames = []
+  with open("results/logs/telemetry_stream.log") as f:
+      for line in f:
+          frames.append(json.loads(line.strip()))
+
+  # Option B — stream line by line (simulate live feed)
+  import json, time
+  with open("results/logs/telemetry_stream.log") as f:
+      for line in f:
+          frame = json.loads(line.strip())
+          process(frame)     # your Streamlit update function
+          time.sleep(0.5)    # adjust for replay speed
+
+
+FRAME KEYS
+──────────────────────────────────────────────────────────────
+  log_ts               Original factory timestamp (string)
+  recv_ts              Simulated receive timestamp — USE FOR X-AXIS (string)
+  station              Station ID  e.g. "MM_1"
+  mod_scheme           Demodulation scheme  "AM"
+  segment_idx          Segment number 0-124
+  segment_start        Start of 60-second window
+  segment_end          End of 60-second window
+  machine_state        1 = READY  |  0 = FAULT
+  dt_integrity_flag    1 = OK     |  0 = DEGRADED
+  dt_parity_pass_rate  Fraction of 8-bit parity blocks passed  [0,1]
+  dt_checksum_ok_rate  Fraction of frames with matching 16-bit checksum  [0,1]
+  dt_best_bit_depth    PCM bit depth used  (16 for all stations)
+  dt_channel_ber_awgn  BER at 10 dB SNR under AWGN
+  dt_channel_ber_fading  BER at 10 dB SNR under AWGN + Rayleigh fading
+  features             dict — all signal features (see below)
+  reconstructed        dict — PCM-decoded signal stats (see below)
+  alerts               list — active alert strings (empty = no alerts)
+
+
+FEATURE EXTRACTION
+──────────────────────────────────────────────────────────────
+The "features" dict contains all Phase-2 signal features for
+the segment, keyed as  {{signal}}_{{feature}}_{{source}}:
+
+  Sources  : _baseband  |  _am_demodulated
+  Features : _rms  _mean  _variance  _fft_peak
+             _psd_peak  _psd_mean_energy  _psd_peak_freq
+
+Examples (MM_1):
+  frame["features"]["m1_speed_rms_baseband"]
+  frame["features"]["m1_speed_psd_peak_am_demodulated"]
+  frame["features"]["m1_speed_psd_peak_freq_baseband"]
+
+To pull all RMS features from a frame:
+  rms = {{k: v for k,v in frame["features"].items() if "_rms_" in k}}
+
+To compare baseband vs demodulated for one signal:
+  bb    = frame["features"]["m1_speed_rms_baseband"]
+  demod = frame["features"]["m1_speed_rms_am_demodulated"]
+
+The "reconstructed" dict contains PCM-decoded per-segment stats:
+  frame["reconstructed"]["m1_speed_baseband_reconstructed_mean"]
+  frame["reconstructed"]["m1_speed_baseband_reconstructed_rms"]
+
+
+ALERT LOGIC
+──────────────────────────────────────────────────────────────
+  for alert in frame["alerts"]:
+      if "MACHINE_FAULT" in alert:
+          st.error(f"RED  {{frame['station']}}: {{alert}}")
+      elif "INTEGRITY" in alert or "CHECKSUM" in alert:
+          st.warning(f"WARN {{frame['station']}}: {{alert}}")
+      elif "BER_WARN" in alert or "PARITY" in alert:
+          st.info(f"INFO {{frame['station']}}: {{alert}}")
+
+
+SUGGESTED STREAMLIT LAYOUT
+──────────────────────────────────────────────────────────────
+  Sidebar
+    station       multiselect (EC_1 ... WT_1)
+    replay_speed  slider 0.1x → 5x (controls time.sleep)
+    feature       selectbox (pick which feature to plot)
+
+  Tab 1 — Live Feed
+    st.metric  machine_state | dt_integrity_flag | dt_channel_ber_awgn
+    st.dataframe  last 20 frames for selected station
+    Alert banner  if frame["alerts"]: st.error(...)
+
+  Tab 2 — Feature Trends
+    st.line_chart  chosen feature over recv_ts
+    Overlay baseband vs am_demodulated vs reconstructed_mean
+
+  Tab 3 — Channel Health
+    Bar chart  dt_channel_ber_awgn vs dt_channel_ber_fading per station
+    Progress bars  dt_parity_pass_rate | dt_checksum_ok_rate
+
+  Tab 4 — PSD Analysis
+    Bar chart  psd_peak and psd_mean_energy per signal
+    Scatter    psd_peak_freq per signal
+
+  Tab 5 — Station Map
+    Heatmap of any feature across all 7 stations over time
+
+
+REPLAY SPEED REFERENCE
+──────────────────────────────────────────────────────────────
+  Real time   time.sleep(30)   1 frame per 30 seconds
+  Fast        time.sleep(1)    1 frame per second
+  Demo        time.sleep(0.2)  5 frames per second
+  Instant     time.sleep(0)    plot everything statically
+
+============================================================
+Digital Telemetry Lead · TELE 523 Group 1
+"""
+    with open(path, "w") as f:
+        f.write(txt)
+    print(f"  README written → {path}")
+
+
 if __name__ == "__main__":
-    run_system()
+    print("=" * 60)
+    print("  TELE 523 · Telemetry Log Generator")
+    print("=" * 60)
+    generate_log()
+    print("=" * 60)
