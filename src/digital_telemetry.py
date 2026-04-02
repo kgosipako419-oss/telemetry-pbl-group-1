@@ -33,7 +33,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 
-PROC_DIR         = "data/processed/digital_telemetry"
+PROC_DIR         = "data/raw"
 OUT_DIR          = "results/logs"
 STATIONS         = ["EC_1", "HBW_1", "MM_1", "OV_1", "SM_1", "VGR_1", "WT_1"]
 MOD_SCHEME       = "AM"
@@ -94,7 +94,7 @@ def generate_log():
     all_frames = []
 
     for station in STATIONS:
-        csv_path = os.path.join(PROC_DIR, f"{station}_{MOD_SCHEME}_monitoring_ready.csv")
+        csv_path = os.path.join(PROC_DIR, f"{station}_features_{MOD_SCHEME}_demod.csv")
         if not os.path.exists(csv_path):
             print(f"  [SKIP] {station}")
             continue
@@ -122,12 +122,12 @@ def generate_log():
                 "segment_start"        : str(row["segment_start"])[:19],
                 "segment_end"          : str(row["segment_end"])[:19],
                 "machine_state"        : int(row["current_state_binary"]),
-                "dt_integrity_flag"    : int(row["dt_integrity_flag"]),
-                "dt_parity_pass_rate"  : round(float(row["dt_parity_pass_rate"]), 4),
-                "dt_checksum_ok_rate"  : round(float(row["dt_checksum_ok_rate"]),  4),
-                "dt_best_bit_depth"    : int(row["dt_best_bit_depth"]),
-                "dt_channel_ber_awgn"  : round(float(row["dt_channel_ber_awgn"]),  6),
-                "dt_channel_ber_fading": round(float(row["dt_channel_ber_fading"]), 6),
+                "dt_integrity_flag"    : int(row.get("dt_integrity_flag", 1)),
+                "dt_parity_pass_rate"  : round(float(row.get("dt_parity_pass_rate", 1.0)), 4),
+                "dt_checksum_ok_rate"  : round(float(row.get("dt_checksum_ok_rate", 1.0)),  4),
+                "dt_best_bit_depth"    : int(row.get("dt_best_bit_depth", 8)),
+                "dt_channel_ber_awgn"  : round(float(row.get("dt_channel_ber_awgn", 0.0)),  6),
+                "dt_channel_ber_fading": round(float(row.get("dt_channel_ber_fading", 0.0)), 6),
                 "features"             : features,
                 "reconstructed"        : reconstructed,
                 "alerts"               : _alerts(row),
@@ -136,7 +136,7 @@ def generate_log():
 
     all_frames.sort(key=lambda f: (f["recv_ts"], f["station"]))
 
-    with open(log_path, "w") as fout:
+    with open(log_path, "w", encoding="utf-8") as fout:
         for frame in all_frames:
             fout.write(json.dumps(frame) + "\n")
 
@@ -285,7 +285,7 @@ REPLAY SPEED REFERENCE
 ============================================================
 Digital Telemetry Lead · TELE 523 Group 1
 """
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(txt)
     print(f"  README written → {path}")
 
