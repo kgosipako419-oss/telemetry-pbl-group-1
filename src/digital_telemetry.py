@@ -160,12 +160,12 @@ def pcm_decode_indices(bitstream: np.ndarray, bits: int) -> np.ndarray:
 # 3. LINE CODING — NRZ-L and Manchester
 # ──────────────────────────────────────────────────────────────────────────────
 def nrz_l(bits: np.ndarray) -> np.ndarray:
-    """NRZ-L: 1 → +1,  0 → -1."""
+    """NRZ-L: 1 -> +1,  0 -> -1."""
     return np.where(bits == 1, 1.0, -1.0)
 
 
 def manchester(bits: np.ndarray) -> np.ndarray:
-    """IEEE 802.3 Manchester: 0 → [+1,-1],  1 → [-1,+1]."""
+    """IEEE 802.3 Manchester: 0 -> [+1,-1],  1 -> [-1,+1]."""
     encoded = np.empty(len(bits) * 2, dtype=float)
     encoded[0::2] = np.where(bits == 0,  1.0, -1.0)
     encoded[1::2] = np.where(bits == 0, -1.0,  1.0)
@@ -313,7 +313,7 @@ def run_dt_pipeline(signal: np.ndarray, mod: str) -> dict:
     ber_awgn = ber_awgn_theory(SNR_DB, mod)
     ber_ray  = ber_rayleigh(SNR_DB, mod)
 
-    # PCM decode → reconstructed signal stats
+    # PCM decode -> reconstructed signal stats
     decoded_idx        = pcm_decode_indices(bitstream, best_bd)
     step               = 1.0 / (2 ** best_bd)
     recon_vals         = np.clip((decoded_idx + 0.5) * step, 0.0, 1.0)
@@ -376,7 +376,7 @@ def _save_fig(fig, name):
     path = os.path.join(FIG_DIR, name)
     fig.savefig(path, dpi=120, bbox_inches="tight")
     plt.close(fig)
-    print(f"    Figure → {path}")
+    print(f"    Figure -> {path}")
 
 
 def generate_figures(sqnr_records, lc_records, ber_records, all_frames):
@@ -489,7 +489,7 @@ def generate_log():
     sqnr_records = []
     lc_records   = []
     ber_records  = []
-    recv_counter = 0  # global tick → recv_ts
+    recv_counter = 0  # global tick -> recv_ts
 
     for mod in MOD_SCHEMES:
         dt_report[mod] = {}
@@ -542,7 +542,7 @@ def generate_log():
                 recv_counter += 1
 
                 # Run DT pipeline on the primary signal for this segment
-                seg_signal = np.array([primary_arr[seg_idx]] * 128)  # expand scalar → short array
+                seg_signal = np.array([primary_arr[seg_idx]] * 128)  # expand scalar -> short array
                 dt         = run_dt_pipeline(seg_signal, mod)
 
                 machine_state = int(row.get("current_state_binary", 1))
@@ -655,15 +655,15 @@ def generate_log():
 
     total_alerts = sum(len(f["alerts"]) for f in stream_frames)
     print(f"\n  ═══════════════════════════════════════════════════════════")
-    print(f"  Stream log (PSK)     → {stream_path}  [{len(stream_frames)} frames]")
-    print(f"  DT report (JSON)     → {dt_path}  [all 5 mods]")
-    print(f"  SQNR CSV             → {sqnr_csv_path}")
-    print(f"  Line coding CSV      → {lc_csv_path}")
-    print(f"  Figures              → {FIG_DIR}/")
+    print(f"  Stream log (PSK)     -> {stream_path}  [{len(stream_frames)} frames]")
+    print(f"  DT report (JSON)     -> {dt_path}  [all 5 mods]")
+    print(f"  SQNR CSV             -> {sqnr_csv_path}")
+    print(f"  Line coding CSV      -> {lc_csv_path}")
+    print(f"  Figures              -> {FIG_DIR}/")
     print(f"  DT frames analysed   : {len(all_frames)}  (AM+FM+ASK+FSK+PSK)")
     print(f"  Stream frames (PSK)  : {len(stream_frames)}")
     print(f"  Alerts (PSK stream)  : {total_alerts}")
-    print(f"  Stream time span     : {t_start} → {t_end}")
+    print(f"  Stream time span     : {t_start} -> {t_end}")
     print(f"  ═══════════════════════════════════════════════════════════")
 
 
@@ -952,7 +952,7 @@ if __name__ == "__main__":
     print("=" * 62)
     print("  TELE 523 · Digital Telemetry Log Generator")
     print(f"  Modulations : {', '.join(MOD_SCHEMES)}")
-    print("  DT chain    : Quant → PCM → LineCoding → Parity/CRC → BER")
+    print("  DT chain    : Quant -> PCM -> LineCoding -> Parity/CRC -> BER")
     print("=" * 62)
     generate_log()
     print("=" * 62)
