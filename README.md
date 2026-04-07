@@ -103,7 +103,7 @@ objectives:
 
 ## System Pipeline
 
-```
+
 ┌─────────────────────────────────┐
 │   Fischertechnik IoT Dataset    │  data/raw/
 └────────────────┬────────────────┘
