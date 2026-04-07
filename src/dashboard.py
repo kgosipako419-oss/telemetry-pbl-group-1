@@ -1013,7 +1013,7 @@ def _make_factory_3d_figure(flow_phase=0.0):
     return fig
 
 # ─── APP INIT ─────────────────────────────────────────────────────────────────
-app = Dash(__name__, title="Smart Factory · HSG", suppress_callback_exceptions=True)
+app = Dash(__name__, title="OverTelecomms Engineering · HSG", suppress_callback_exceptions=True)
 
 # CSS injection for slider styling
 app.index_string = '''
@@ -1072,7 +1072,7 @@ app.layout = html.Div(style={
                           style={"fontSize": "11px", "color": INFO, "marginLeft": "8px",
                                  "letterSpacing": "0.06em"}),
             ], style={"display": "flex", "alignItems": "center"}),
-            html.Div("FISCHERTECHNIK · UNIVERSITY OF ST.GALLEN",
+            html.Div("FISCHERTECHNIK · Pty Ltd. © 2024",
                      style={"fontSize": "9px", "color": MUTED2, "marginTop": "3px",
                             "letterSpacing": "0.12em"}),
         ]),
@@ -1146,6 +1146,15 @@ app.layout = html.Div(style={
                                          "borderTop": f"2px solid {ACC}",
                                          "fontWeight": "700"}),
                  dcc.Tab(label="LOGISTICS",    value="logistics",
+                         style={"color": MUTED, "background": BG, "border": "none",
+                                "padding": "8px 14px", "fontSize": "10px",
+                                "fontFamily": FONT_BODY, "letterSpacing": "0.08em"},
+                         selected_style={"color": HEAD, "background": CARD2,
+                                         "border": f"1px solid {GRID2}",
+                                         "borderBottom": f"1px solid {CARD2}",
+                                         "borderTop": f"2px solid {ACC}",
+                                         "fontWeight": "700"}),
+                 dcc.Tab(label="SYSTEM FLOW",  value="system_flow",
                          style={"color": MUTED, "background": BG, "border": "none",
                                 "padding": "8px 14px", "fontSize": "10px",
                                 "fontFamily": FONT_BODY, "letterSpacing": "0.08em"},
@@ -1346,6 +1355,7 @@ def render_tab(tab, play_clicks, pause_clicks, speed):
     if tab == "overview":   return build_overview()
     if tab == "production": return build_production()
     if tab == "logistics":  return build_logistics()
+    if tab == "system_flow": return build_system_flow()
     if tab == "telemetry":  return build_telemetry()
     if tab == "ec_signal":  return build_ec_signal()
     if tab == "event_log":  return build_event_log()
@@ -1496,6 +1506,43 @@ def build_overview():
     ])
 
 # ─── TAB: PRODUCTION ──────────────────────────────────────────────────────────
+def build_system_flow():
+    chips = []
+    with health_lock:
+        scores = dict(health_scores)
+    for s in STATIONS:
+        d = latest.get(s, {})
+        state = d.get("current_state", "--").upper()
+        task = (d.get("current_task", "") or "idle")[:28]
+        col = _health_color(scores[s])
+        chips.append(html.Div([
+            html.Div(MACHINE_NAMES[s], style={"fontSize": "10px", "fontWeight": "700", "color": HEAD}),
+            html.Div(state, style={"fontSize": "8px", "letterSpacing": "0.08em", "color": col, "marginTop": "2px"}),
+            html.Div(task, style={"fontSize": "8px", "color": MUTED2, "marginTop": "4px"}),
+        ], style={"background": CARD, "border": BORDER_W, "borderTop": f"2px solid {col}",
+                  "borderRadius": BORDER_R, "padding": "10px 12px", "minWidth": "140px", "flex": "1"}))
+
+    return html.Div([
+        section_hdr("System Flow â€” 3D Factory Coordination View", ACC2),
+        html.Div([
+            dcc.Graph(id="system-flow-3d", figure=_make_factory_3d_figure(0.0),
+                      style={"height": "520px"},
+                      config={"displayModeBar": False}),
+        ], style={"background": CARD2, "borderRadius": BORDER_R, "padding": "12px",
+                  "border": BORDER_W, "marginBottom": "12px"}),
+        html.Div(chips, style={"display": "flex", "gap": "8px", "flexWrap": "wrap"}),
+    ])
+
+@app.callback(
+    Output("system-flow-3d", "figure"),
+    Input("interval", "n_intervals"),
+    Input("main-tabs", "value"),
+)
+def update_system_flow_3d(n_intervals, tab):
+    if tab != "system_flow":
+        raise PreventUpdate
+    return _make_factory_3d_figure((n_intervals % 24) / 24.0)
+
 def build_production():
     return html.Div([
         section_hdr("Production Machines — Milling · Oven · Sorting", MUTED2),
@@ -2058,6 +2105,9 @@ def build_event_log():
 def build_health():
     return html.Div([
         section_hdr("Machine Health & Deterioration Monitor", MUTED2),
+        html.Div(id="health-score-cards",
+                 style={"display": "flex", "gap": "8px", "flexWrap": "wrap",
+                        "marginBottom": "14px"}),
         html.Div([
             html.Div([
                 dcc.Graph(id="health-fleet-gauge", config={"displayModeBar": False},
@@ -2067,19 +2117,19 @@ def build_health():
             html.Div([
                 section_hdr("Health Comparison — All Machines", MUTED2),
                 dcc.Graph(id="health-bar-chart", config={"displayModeBar": False},
-                          style={"height": "260px"}),
+                          style={"height": "210px"}),
             ], style={"background": CARD2, "borderRadius": BORDER_R, "padding": "12px",
                       "flex": "2", "minWidth": "300px", "border": BORDER_W}),
         ], style={"display": "flex", "gap": "10px", "flexWrap": "wrap", "marginBottom": "12px"}),
         html.Div([
             section_hdr("Health Deterioration Trend — All Machines", MUTED2),
             dcc.Graph(id="health-trend-chart", config={"displayModeBar": False},
-                      style={"height": "0px", "display": "none"}),
+                      style={"height": "260px"}),
         ], style={"background": CARD2, "borderRadius": BORDER_R, "padding": "12px",
                   "marginBottom": "12px", "border": BORDER_W}),
         html.Div([
             section_hdr("Score Breakdown — Sub-component Detail", MUTED2),
-            html.Div(id="health-detail-table", style={"overflowX": "auto", "display": "none"}),
+            html.Div(id="health-detail-table", style={"overflowX": "auto"}),
         ], style={"background": CARD2, "borderRadius": BORDER_R, "padding": "12px",
                   "border": BORDER_W}),
     ])
@@ -2171,20 +2221,14 @@ def update_fleet_gauge(_):
 @app.callback(Output("health-bar-chart","figure"), Input("interval","n_intervals"))
 def update_health_bar(_):
     with health_lock: scores = dict(health_scores)
+    labels = [MACHINE_NAMES[s] for s in STATIONS]
     vals   = [scores[s] for s in STATIONS]
     colors = [_health_color(v) for v in vals]
     fig    = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=[MACHINE_NAMES[s] for s in STATIONS],
-        y=vals,
-        mode="lines+markers+text",
-        line={"color": ACC2, "width": 2.5},
-        marker={"size": 10, "color": colors, "line": {"width": 1.5, "color": HEAD}},
-        text=[f"{v:.0f}%" for v in vals],
-        textposition="top center",
+    fig.add_trace(go.Bar(
+        x=labels, y=vals, marker_color=colors, marker_line_width=0,
+        text=[f"{v:.0f}%" for v in vals], textposition="outside",
         textfont={"size": 10, "color": HEAD, "family": FONT_BODY},
-        hovertemplate="%{x}<br>Health: %{y:.1f}%<extra></extra>",
-        showlegend=False,
     ))
     for thresh, col, lbl in [(80, OK, "NOMINAL"), (CRITICAL_HEALTH_THRESHOLD, DANGER, "CRITICAL"),
                               (WARNING_HEALTH_THRESHOLD, WARN, "WARNING")]:
@@ -2195,10 +2239,10 @@ def update_health_bar(_):
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor=BG,
         font={"color": MUTED, "size": 10, "family": FONT_BODY},
-        margin={"l": 36, "r": 80, "t": 16, "b": 54}, height=260,
+        margin={"l": 36, "r": 80, "t": 16, "b": 54}, height=210,
         xaxis={"gridcolor": GRID, "tickangle": -20, "tickfont": {"size": 9}},
         yaxis={"gridcolor": GRID, "range": [0, 115], "zeroline": False, "title": "Health %"},
-        hovermode="x unified", showlegend=False,
+        bargap=0.3, showlegend=False,
     )
     return fig
 
@@ -2588,7 +2632,6 @@ def run_playback(filepath: str):
     lines = Path(filepath).read_text(encoding="utf-8").splitlines()
     playback["total_lines"] = len(lines)
     prev_ts = None
-    last_station_ts = {}
 
     for idx, line in enumerate(lines):
         while playback["paused"] and playback["running"]:
@@ -2620,8 +2663,6 @@ def run_playback(filepath: str):
         prev_ts = ts
 
         update_ec_state(obj, ts)
-        if station in STATIONS:
-            last_station_ts[station] = ts
 
         if station not in STATIONS:
             continue
@@ -2690,18 +2731,6 @@ def run_playback(filepath: str):
                     })
                 _active_sub[station] = {"task": cur_task, "sub": label,
                                         "start": ts if label else None}
-
-    for station, active in _active_sub.items():
-        end_ts = last_station_ts.get(station)
-        if active["sub"] and active["start"] is not None and end_ts is not None:
-            gantt_tasks.append({
-                "station":  station,
-                "task":     active["task"],
-                "sub_task": active["sub"],
-                "start":    active["start"],
-                "end":      end_ts,
-            })
-            _active_sub[station] = {"task": None, "sub": None, "start": None}
 
     playback["running"] = False
 
