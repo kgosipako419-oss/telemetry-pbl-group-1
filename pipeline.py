@@ -9,6 +9,7 @@ Stages
 3. Modulation             (src/modulation.py  → modulation.main())
 4. Demodulation           (src/demodulation.py → demodulation.main())
 5. Digital Telemetry      (src/digital_telemetry.py → generate_log())
+6. Dashboard              (src/dashboard.py  → Dash web app on port 8050)
 
 Usage
 -----
@@ -120,6 +121,27 @@ def stage_digital_telemetry() -> bool:
     return _run_module_main("digital_telemetry", "Digital Telemetry")
 
 
+def stage_dashboard() -> bool:
+    _banner("Stage 6 · Dashboard")
+    log_file = BASE_DIR / "low-level_log_20230206-140808.txt"
+    if not log_file.exists():
+        _err(f"Log file not found: {log_file}")
+        return False
+    _info("Launching Dash dashboard on http://127.0.0.1:8050 (press Ctrl+C to stop)")
+    result = subprocess.run(
+        [sys.executable, str(SRC_DIR / "dashboard.py"), "--file", str(log_file), "--port", "8050"],
+        capture_output=False,
+        text=True,
+        cwd=str(BASE_DIR),
+    )
+    if result.returncode == 0:
+        _ok("Dashboard exited cleanly.")
+        return True
+    else:
+        _err(f"Dashboard exited with code {result.returncode}")
+        return False
+
+
 # ── Summary ────────────────────────────────────────────────────────────────────
 
 def print_summary(results: dict) -> None:
@@ -146,6 +168,7 @@ STAGE_MAP = {
     3: ("Modulation",         stage_modulation),
     4: ("Demodulation",       stage_demodulation),
     5: ("Digital Telemetry",  stage_digital_telemetry),
+    6: ("Dashboard",          stage_dashboard),
 }
 
 
@@ -155,7 +178,7 @@ def main():
     )
     parser.add_argument(
         "--stage", nargs="+", type=int, metavar="N",
-        help="Run only specific stages by number (1=Preprocessing … 5=Telemetry)."
+        help="Run only specific stages by number (1=Preprocessing … 6=Dashboard)."
     )
     args = parser.parse_args()
 
@@ -167,7 +190,7 @@ def main():
     stages_to_run = args.stage if args.stage else list(STAGE_MAP.keys())
     invalid = [s for s in stages_to_run if s not in STAGE_MAP]
     if invalid:
-        _err(f"Unknown stage numbers: {invalid}. Valid: 1–5")
+        _err(f"Unknown stage numbers: {invalid}. Valid: 1–6")
         sys.exit(1)
 
     for num in stages_to_run:
