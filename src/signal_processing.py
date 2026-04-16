@@ -16,11 +16,15 @@ Output: data/processed/<STATION>_filtered.csv  (FIR-filtered, full signal)
 import pandas as pd
 import numpy as np
 import os
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 from scipy.signal import firwin, lfilter, welch
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 BASE_DIR        = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROCESSED_PATH  = os.path.join(BASE_DIR, "data", "processed")
+RESULTS_PATH    = os.path.join(BASE_DIR, "results")
+os.makedirs(RESULTS_PATH, exist_ok=True)
 
 # ── Sampling config ───────────────────────────────────────────────────────────
 FS              = 0.5           # Hz  — one sample every 2 seconds
@@ -278,3 +282,107 @@ print(f"\n{'═'*60}")
 print("Phase 2 complete — FIR-filtered signals + segmented features")
 print("Handing over to Modulation Lead.")
 print(f"{'═'*60}")
+
+# ── Plot: all filtered signals per station → results/ ─────────────────────────
+print("\nGenerating filtered-signal charts…")
+TAB20 = cm.get_cmap("tab20")
+
+for station, sig_cols in sorted(SIGNAL_COLS.items()):
+    filtered_csv = os.path.join(PROCESSED_PATH, f"{station}_filtered.csv")
+    if not os.path.exists(filtered_csv):
+        print(f"  ⚠  {station}_filtered.csv not found, skipping plot.")
+        continue
+
+    sdf = pd.read_csv(filtered_csv)
+    cols = [c for c in sig_cols if c in sdf.columns]
+    if not cols:
+        continue
+
+    n = len(cols)
+    row_h = max(1.4, 90 / n)
+    fig, axes = plt.subplots(n, 1, figsize=(18, row_h * n), sharex=True)
+    fig.patch.set_facecolor("#0d1117")
+    if n == 1:
+        axes = [axes]
+
+    fig.suptitle(
+        f"Station {station} — {n} signals  [SIGNAL PROCESSING · FIR filtered, 2 s grid]",
+        fontsize=13, fontweight="bold", color="white", y=1.002,
+    )
+
+    x = np.arange(len(sdf))
+    for i, (ax, col) in enumerate(zip(axes, cols)):
+        color = TAB20(i / max(n, 1))
+        vals = pd.to_numeric(sdf[col], errors="coerce").to_numpy()
+        ax.set_facecolor("#161b22")
+        ax.plot(x, vals, linewidth=0.9, color=color)
+        ax.set_ylabel(col, fontsize=7, rotation=0, labelpad=2,
+                      ha="right", va="center", color="#cccccc")
+        ax.tick_params(axis="both", labelsize=6, colors="#aaaaaa")
+        ax.spines[:].set_color("#333333")
+        ax.grid(axis="x", linewidth=0.3, alpha=0.4, color="#444444")
+
+        if "current_state_binary" in sdf.columns:
+            ready_mask = sdf["current_state_binary"].astype(float) == 1
+            ax.fill_between(x, 0, 1, where=ready_mask,
+                            color="#2ebd7a", alpha=0.07,
+                            transform=ax.get_xaxis_transform())
+
+    axes[-1].set_xlabel("Sample index", fontsize=8, color="#aaaaaa")
+    plt.tight_layout()
+
+    out_path = os.path.join(RESULTS_PATH, f"{station}_filtered_signals.png")
+    fig.savefig(out_path, dpi=150, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    print(f"  Saved → results/{station}_filtered_signals.png")
+
+print("Signal processing charts saved to results/")
+
+# ── Combined overview: all stations, all signals overlaid ─────────────────────
+print("\nGenerating combined overview chart…")
+stations_sorted = sorted(SIGNAL_COLS.keys())
+n_stations = len(stations_sorted)
+
+fig_all, axes_all = plt.subplots(n_stations, 1, figsize=(20, 5 * n_stations), sharex=False)
+fig_all.patch.set_facecolor("#0d1117")
+fig_all.suptitle(
+    "All Stations — All Filtered Signals  [SIGNAL PROCESSING · FIR filtered, 2 s grid]",
+    fontsize=15, fontweight="bold", color="white", y=1.002,
+)
+
+for ax, station in zip(axes_all, stations_sorted):
+    ax.set_facecolor("#161b22")
+    ax.spines[:].set_color("#333333")
+    ax.tick_params(colors="#aaaaaa", labelsize=7)
+
+    filtered_csv = os.path.join(PROCESSED_PATH, f"{station}_filtered.csv")
+    if not os.path.exists(filtered_csv):
+        ax.text(0.5, 0.5, f"{station} — filtered CSV not found",
+                ha="center", va="center", color="#ff6666",
+                transform=ax.transAxes, fontsize=10)
+        ax.set_title(station, color="white", fontsize=11)
+        continue
+
+    sdf = pd.read_csv(filtered_csv)
+    cols = [c for c in SIGNAL_COLS[station] if c in sdf.columns]
+    x = np.arange(len(sdf))
+    colors_cycle = TAB20(np.linspace(0, 1, max(len(cols), 1)))
+
+    for col, color in zip(cols, colors_cycle):
+        vals = pd.to_numeric(sdf[col], errors="coerce").to_numpy()
+        ax.plot(x, vals, linewidth=0.8, alpha=0.8, label=col, color=color)
+
+    ax.set_title(f"Station: {station}  ({len(cols)} signals)", color="white",
+                 fontsize=11, pad=5)
+    ax.set_xlabel("Sample index", color="#aaaaaa", fontsize=8)
+    ax.set_ylabel("Filtered value", color="#aaaaaa", fontsize=8)
+    ax.legend(loc="upper right", fontsize=7, ncol=3,
+              facecolor="#1e2530", labelcolor="white", framealpha=0.6)
+
+plt.tight_layout()
+combined_path = os.path.join(RESULTS_PATH, "all_filtered_signals.png")
+fig_all.savefig(combined_path, dpi=150, bbox_inches="tight",
+                facecolor=fig_all.get_facecolor())
+plt.close(fig_all)
+print("  Saved → results/all_filtered_signals.png")

@@ -1,10 +1,11 @@
 """
 Image Generation — Preprocessing & Signal Processing Pipeline Visuals
 ======================================================================
-Produces three figures in results/:
-  1. PREPROCESSING_pipeline.png         — full step-by-step pipeline diagram
-  2. PREPROCESSING_results_summary.png  — bar charts + step tables
-  3. PREPROCESSING_interconnection_web.png — station data-flow web
+Produces four figures in results/:
+  1. PREPROCESSING_pipeline.png              — full step-by-step pipeline diagram
+  2. PREPROCESSING_results_summary.png       — bar charts + step tables
+  3. PREPROCESSING_interconnection_web.png   — station data-flow web
+  4. SIGNAL_PROCESSING_filtered_signals.png  — all signals after FIR filtering
 """
 
 import matplotlib.pyplot as plt
@@ -378,3 +379,86 @@ plt.savefig(os.path.join(OUT, "PREPROCESSING_interconnection_web.png"),
             dpi=180, bbox_inches="tight", facecolor=fig3.get_facecolor())
 plt.close()
 print("Image 3 saved → results/PREPROCESSING_interconnection_web.png")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IMAGE 4 — All Signals After Signal Processing (FIR-filtered)
+# ══════════════════════════════════════════════════════════════════════════════
+SIGNAL_COLS = {
+    "EC_1"  : ["i3_photoresistor", "current_task_duration"],
+    "HBW_1" : ["m1_speed", "m2_speed", "m3_speed", "m4_speed",
+                "current_pos_x", "current_pos_y",
+                "target_pos_x", "target_pos_y", "current_task_duration"],
+    "MM_1"  : ["m1_speed", "m2_speed", "m3_speed",
+                "o8_compressor", "current_task_duration"],
+    "OV_1"  : ["m1_speed", "o8_compressor", "current_task_duration"],
+    "SM_1"  : ["m1_speed", "o8_compressor", "current_task_duration"],
+    "VGR_1" : ["m1_speed", "m2_speed", "m3_speed",
+                "current_pos_x", "current_pos_y", "current_pos_z",
+                "target_pos_x", "target_pos_y", "target_pos_z",
+                "current_task_duration"],
+    "WT_1"  : ["m2_speed", "o8_compressor", "current_task_duration"],
+}
+
+PROCESSED_PATH = os.path.join(BASE_DIR, "data", "processed")
+
+TAB20 = plt.get_cmap("tab20")
+
+n_stations = len(STATIONS)
+# one column per station, rows = max signal count across all stations
+max_sigs = max(len(v) for v in SIGNAL_COLS.values())
+n_cols = 2
+n_rows = (n_stations + 1) // n_cols   # ceil divide
+
+fig4, axes4 = plt.subplots(
+    n_rows, n_cols,
+    figsize=(22, 5 * n_rows),
+)
+fig4.patch.set_facecolor("#0d1117")
+fig4.suptitle(
+    "All Signals After Signal Processing  (FIR low-pass filtered, resampled to 2 s grid)\n"
+    "TELE 523 · Group 5",
+    fontsize=14, fontweight="bold", color="white", y=1.01,
+)
+
+axes4_flat = axes4.flatten()
+
+for idx, station in enumerate(STATIONS):
+    ax = axes4_flat[idx]
+    ax.set_facecolor("#161b22")
+    ax.spines[:].set_color("#333333")
+    ax.tick_params(colors="#aaaaaa", labelsize=7)
+
+    filtered_csv = os.path.join(PROCESSED_PATH, f"{station}_filtered.csv")
+    if not os.path.exists(filtered_csv):
+        ax.text(0.5, 0.5, f"{station}\n(filtered CSV not found)",
+                ha="center", va="center", color="#ff6666",
+                transform=ax.transAxes, fontsize=10)
+        ax.set_title(station, color="white", fontsize=11)
+        continue
+
+    sdf = pd.read_csv(filtered_csv)
+    sig_cols = [c for c in SIGNAL_COLS[station] if c in sdf.columns]
+    x = np.arange(len(sdf))
+
+    for i, col in enumerate(sig_cols):
+        color = TAB20(i / max(len(sig_cols), 1))
+        vals = pd.to_numeric(sdf[col], errors="coerce").to_numpy()
+        ax.plot(x, vals, linewidth=0.9, alpha=0.85, label=col, color=color)
+
+    ax.set_title(f"{station}  ({len(sig_cols)} signals)", color="white",
+                 fontsize=11, pad=6)
+    ax.set_xlabel("Sample index", color="#aaaaaa", fontsize=8)
+    ax.set_ylabel("Filtered value", color="#aaaaaa", fontsize=8)
+    ax.legend(loc="upper right", fontsize=7, ncol=2,
+              facecolor="#1e2530", labelcolor="white", framealpha=0.7)
+
+# hide any unused subplot cells
+for idx in range(n_stations, len(axes4_flat)):
+    axes4_flat[idx].set_visible(False)
+
+plt.tight_layout()
+plt.savefig(os.path.join(OUT, "SIGNAL_PROCESSING_filtered_signals.png"),
+            dpi=180, bbox_inches="tight", facecolor=fig4.get_facecolor())
+plt.close()
+print("Image 4 saved → results/SIGNAL_PROCESSING_filtered_signals.png")
