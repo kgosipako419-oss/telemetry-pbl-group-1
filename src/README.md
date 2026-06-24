@@ -1,6 +1,6 @@
 # 📡 Telemetry PBL – Group 1
 ### TELE 523 · Industrial Machine Condition Monitoring
-**Branch: `PREPROCESSING`** — Signal Processing Lead
+**Branch: `PREPROCESSING`** — Signal Processing Lead(Thebe Ratsatsi)
 
 ---
 
